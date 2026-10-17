@@ -1,0 +1,73 @@
+
+name: Australian Racing Strategy 4.0
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: australian-racing-strategy4
+  cancel-in-progress: false
+
+jobs:
+  racing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Determine next Australian racing date
+        id: dates
+        shell: bash
+        run: |
+          echo "race_date=$(TZ=Australia/Sydney date -d tomorrow +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Check scoring engine
+        run: |
+          python -m py_compile strategy4.py
+          python strategy4.py --help
+
+      - name: Create reports directory
+        run: |
+          mkdir -p reports
+
+      - name: Generate provisional report
+        run: |
+          python strategy4.py report \
+            "${{ steps.dates.outputs.race_date }}" \
+            --output reports
+
+      - name: Save reports and database
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add reports/ strategy4.sqlite
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Update Australian racing analysis"
+            git push
+          else
+            echo "No new changes to save."
+          fi
+
+      - name: Upload report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: racing-report-${{ steps.dates.outputs.race_date }}
+          path: |
+            reports/
+            strategy4.sqlite
+          retention-days: 30
