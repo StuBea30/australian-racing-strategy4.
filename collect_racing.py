@@ -2,16 +2,13 @@
 #!/usr/bin/env python3
 """
 Australian Racing Strategy 4.0
-Live programme discovery and source capture.
+Programme collector — corrected for the
+Ladbrokes Form Guide HTML structure.
 
-Sources:
-  Ladbrokes Form Guide
-  Racing and Sports (reference source)
+Discovers eligible Australian thoroughbred
+meetings and numbered race links.
 
-This module discovers meetings and race links,
-saves source HTML and creates a coverage manifest.
-
-It does not invent horses, form or scores.
+Does not yet collect runners or score horses.
 """
 
 import argparse
@@ -19,418 +16,281 @@ import csv
 import datetime as dt
 import json
 import re
-import time
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
 
-BASE = "https://ladbrokesform.com.au"
+BASE_URL = "https://ladbrokesform.com.au"
 
-ALL_STATES = {"VIC", "NSW", "SA"}
-METRO_STATES = {"QLD", "WA", "TAS", "ACT"}
+ALL_MEETINGS_STATES = {"VIC", "NSW", "SA"}
+METRO_ONLY_STATES = {"QLD", "WA", "TAS", "ACT"}
 
-# A starter mapping for known racecourses.
-# Unknown courses remain unclassified and
-# are reported for review, never silently
-# treated as ineligible.
-COURSES = {
-    "Moe": ("VIC", False),
-    "Horsham": ("VIC", False),
-    "Caulfield": ("VIC", True),
-    "Flemington": ("VIC", True),
-    "Moonee Valley": ("VIC", True),
-    "Sandown": ("VIC", True),
-    "Bendigo": ("VIC", False),
-    "Ballarat": ("VIC", False),
-    "Geelong": ("VIC", False),
-    "Wodonga": ("VIC", False),
-    "Warrnambool": ("VIC", False),
-    "Mornington": ("VIC", False),
-    "Randwick": ("NSW", True),
-    "Rosehill": ("NSW", True),
-    "Warwick Farm": ("NSW", True),
-    "Canterbury": ("NSW", True),
-    "Nowra": ("NSW", False),
-    "Lismore": ("NSW", False),
-    "Newcastle": ("NSW", False),
-    "Kembla Grange": ("NSW", False),
-    "Goulburn": ("NSW", False),
-    "Wagga": ("NSW", False),
-    "Hawkesbury": ("NSW", False),
-    "Morphettville": ("SA", True),
-    "Murray Bridge": ("SA", False),
-    "Strathalbyn": ("SA", False),
-    "Balaklava": ("SA", False),
-    "Gawler": ("SA", False),
-    "Oakbank": ("SA", False),
-    "Port Lincoln": ("SA", False),
-    "Doomben": ("QLD", True),
-    "Eagle Farm": ("QLD", True),
-    "Gold Coast": ("QLD", False),
-    "Townsville": ("QLD", False),
-    "Sunshine Coast": ("QLD", False),
-    "Ascot": ("WA", True),
-    "Belmont": ("WA", True),
-    "Pinjarra": ("WA", False),
-    "Kalgoorlie": ("WA", False),
-    "Hobart": ("TAS", True),
-    "Launceston": ("TAS", True),
-    "Devonport": ("TAS", False),
-    "Canberra": ("ACT", True),
+METRO_COURSES = {
+    "QLD": {
+        "Eagle Farm", "Doomben",
+    },
+    "WA": {
+        "Ascot", "Belmont", "Belmont Park",
+    },
+    "TAS": {
+        "Hobart", "Launceston",
+    },
+    "ACT": {
+        "Canberra",
+    },
 }
 
-SESSION = requests.Session()
-SESSION.headers.update({
+FIELDS = [
+    "date", "state", "meeting", "metro",
+    "race", "race_name", "race_url",
+]
+
+HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (compatible; "
-        "RacingStrategy4Research/1.0)"
+        "Mozilla/5.0 "
+        "(compatible; RacingStrategy4/1.0)"
     ),
     "Accept": "text/html,application/xhtml+xml",
-})
-
-TIMEOUT = 25
+}
 
 
-def tomorrow_in_sydney():
+def tomorrow_sydney():
+    now = dt.datetime.now(
+        ZoneInfo("Australia/Sydney")
+    )
     return (
-        dt.datetime.now(ZoneInfo("Australia/Sydney"))
-        + dt.timedelta(days=1)
-    ).date().isoformat()
+        now.date() + dt.timedelta(days=1)
+    ).isoformat()
 
 
-def normalise(value):
-    return re.sub(r"\s+", " ", value).strip()
+def eligible(state, meeting):
+    if state in ALL_MEETINGS_STATES:
+        return True, False
+
+    if state in METRO_ONLY_STATES:
+        metro = meeting.casefold() in {
+            name.casefold()
+            for name in METRO_COURSES.get(
+                state, set()
+            )
+        }
+        return metro, metro
+
+    return False, False
 
 
-def classify_course(name):
-    name = normalise(name).lower()
+def fetch_programme(date):
+    url = f"{BASE_URL}/{date}"
 
-    for course, details in COURSES.items():
-        if course.lower() == name:
-            return details
-
-    return None, None
-
-
-def eligible(state, metro):
-    if state in ALL_STATES:
-        return True
-
-    return state in METRO_STATES and metro is True
-
-
-def fetch(url):
-    response = SESSION.get(
+    response = requests.get(
         url,
-        timeout=TIMEOUT,
-        allow_redirects=True,
+        headers=HEADERS,
+        timeout=30,
     )
     response.raise_for_status()
-
-    if "html" not in response.headers.get(
-        "Content-Type", ""
-    ).lower():
-        raise ValueError(
-            f"Expected HTML from {url}"
-        )
 
     return response.text, response.url
 
 
-def safe_name(value):
-    value = re.sub(
-        r"[^a-zA-Z0-9_-]+", "_", value
+def find_thoroughbred_section(soup):
+    for section in soup.find_all("section"):
+        heading = section.find("h3")
+
+        if heading and heading.get_text(
+            " ", strip=True
+        ).casefold() == "horse racing":
+            return section
+
+    return None
+
+
+def parse_programme(html, source_url, date):
+    soup = BeautifulSoup(
+        html, "html.parser"
     )
-    return value.strip("_")[:100] or "page"
 
+    section = find_thoroughbred_section(soup)
 
-def save_html(folder, name, html):
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / (safe_name(name) + ".html")
-    path.write_text(html, encoding="utf-8")
-    return str(path)
-
-
-def discover_meetings(html, base_url):
-    """
-    Discover meeting links using anchor structure.
-
-    Only return named racecourses with links.
-    A missing course is not proof it is absent.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    meetings = {}
-    unknown_links = []
-
-    for anchor in soup.find_all("a", href=True):
-        name = normalise(
-            anchor.get_text(" ", strip=True)
+    if section is None:
+        raise ValueError(
+            "Australian thoroughbred section "
+            "not found in source HTML"
         )
-        href = urljoin(base_url, anchor["href"])
 
-        state, metro = classify_course(name)
+    table = section.find("table")
 
-        if state is None:
-            continue
-
-        if not eligible(state, metro):
-            continue
-
-        if urlparse(href).netloc not in {
-            "ladbrokesform.com.au",
-            "www.ladbrokesform.com.au",
-        }:
-            unknown_links.append(href)
-            continue
-
-        key = (state, name)
-
-        meetings[key] = {
-            "state": state,
-            "meeting": name,
-            "metro": metro,
-            "meeting_url": href,
-        }
-
-    return list(meetings.values()), unknown_links
-
-
-def discover_race_links(html, base_url):
-    """
-    Extract links whose visible text or URL
-    indicates an individual numbered race.
-
-    This is intentionally conservative.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    races = {}
-
-    for anchor in soup.find_all("a", href=True):
-        label = normalise(
-            anchor.get_text(" ", strip=True)
+    if table is None:
+        raise ValueError(
+            "Race programme table not found"
         )
-        href = urljoin(base_url, anchor["href"])
 
-        patterns = [
-            r"\bRace\s*(\d{1,2})\b",
-            r"\bR\s*(\d{1,2})\b",
-            r"(?:/race/|/races/)(\d{1,2})(?:/|$)",
-        ]
+    meetings = []
+    races = []
+    excluded = []
+    unknown = []
 
-        race_number = None
+    for tr in table.select("tbody tr"):
+        cells = tr.find_all(
+            "td", recursive=False
+        )
 
-        for pattern in patterns:
-            match = re.search(
-                pattern,
-                label + " " + href,
-                re.IGNORECASE,
+        if not cells:
+            continue
+
+        venue_text = cells[0].get_text(
+            " ", strip=True
+        )
+
+        match = re.match(
+            r"^(.*?)\s*\(\s*"
+            r"(VIC|NSW|SA|QLD|WA|TAS|ACT|NZ)"
+            r"\s*\)$",
+            venue_text,
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            unknown.append(venue_text)
+            continue
+
+        meeting = match.group(1).strip()
+        state = match.group(2).upper()
+
+        include, metro = eligible(
+            state, meeting
+        )
+
+        if not include:
+            excluded.append({
+                "meeting": meeting,
+                "state": state,
+            })
+            continue
+
+        meeting_races = []
+
+        # The table columns themselves identify
+        # Race 1, Race 2, Race 3, etc.
+        for race_number, cell in enumerate(
+            cells[1:], start=1
+        ):
+            link = cell.find(
+                "a", href=True
             )
-            if match:
-                race_number = int(match.group(1))
-                break
 
-        if race_number is None:
-            continue
+            if link is None:
+                continue
 
-        if not 1 <= race_number <= 15:
-            continue
+            href = link["href"]
 
-        if urlparse(href).netloc not in {
-            "ladbrokesform.com.au",
-            "www.ladbrokesform.com.au",
-        }:
-            continue
+            if not href.startswith("/form/"):
+                continue
 
-        races.setdefault(
-            race_number,
-            {
+            row = {
+                "date": date,
+                "state": state,
+                "meeting": meeting,
+                "metro": metro,
                 "race": race_number,
-                "race_name": label,
-                "race_url": href,
-            },
-        )
+                "race_name": "",
+                "race_url": urljoin(
+                    source_url, href
+                ),
+            }
 
-    return [
-        races[number]
-        for number in sorted(races)
-    ]
+            races.append(row)
+            meeting_races.append(
+                race_number
+            )
+
+        meetings.append({
+            "meeting": meeting,
+            "state": state,
+            "metro": metro,
+            "race_count": len(meeting_races),
+            "race_numbers": meeting_races,
+        })
+
+    return {
+        "date": date,
+        "source": source_url,
+        "meetings": meetings,
+        "races": races,
+        "excluded": excluded,
+        "unknown": unknown,
+    }
 
 
-def write_csv(path, rows, fields):
-    path.parent.mkdir(
+def save_results(result, html, output):
+    folder = Path(output) / result["date"]
+    source_folder = folder / "sources"
+
+    source_folder.mkdir(
         parents=True, exist_ok=True
     )
 
-    with path.open(
+    (
+        source_folder / "programme.html"
+    ).write_text(
+        html, encoding="utf-8"
+    )
+
+    with (
+        folder / "races.csv"
+    ).open(
         "w",
         newline="",
         encoding="utf-8",
     ) as file:
         writer = csv.DictWriter(
-            file, fieldnames=fields,
-            extrasaction="ignore",
+            file,
+            fieldnames=FIELDS,
         )
         writer.writeheader()
-        writer.writerows(rows)
-
-
-def collect(race_date, root):
-    folder = root / race_date
-    source_folder = folder / "sources"
-
-    folder.mkdir(
-        parents=True, exist_ok=True
-    )
-
-    programme_url = (
-        f"{BASE}/{race_date}"
-    )
+        writer.writerows(
+            result["races"]
+        )
 
     manifest = {
-        "date": race_date,
-        "source": programme_url,
+        "date": result["date"],
+        "source": result["source"],
         "collected_at": (
             dt.datetime.now(
                 dt.timezone.utc
             ).isoformat()
         ),
-        "status": "started",
-        "meetings": [],
-        "errors": [],
-        "unclassified": [],
+        "status": (
+            "race_links_found"
+            if result["races"]
+            else "no_race_links"
+        ),
+        "meeting_count": len(
+            result["meetings"]
+        ),
+        "race_link_count": len(
+            result["races"]
+        ),
+        "meetings": result["meetings"],
+        "excluded": result["excluded"],
+        "unknown": result["unknown"],
+        "runner_collection": "not_implemented",
+        "scoring": "not_implemented",
     }
 
-    try:
-        html, final_url = fetch(
-            programme_url
-        )
-
-        save_html(
-            source_folder,
-            "programme",
-            html,
-        )
-
-        meetings, unknown = discover_meetings(
-            html, final_url
-        )
-
-        manifest["unclassified"] = unknown
-
-    except Exception as error:
-        manifest["status"] = "source_failed"
-        manifest["errors"].append(
-            f"Programme: {type(error).__name__}: {error}"
-        )
-        meetings = []
-
-    race_rows = []
-
-    for meeting in meetings:
-        name = meeting["meeting"]
-
-        entry = dict(meeting)
-        entry["races"] = []
-        entry["status"] = "pending"
-
-        try:
-            html, final_url = fetch(
-                meeting["meeting_url"]
-            )
-
-            entry["source_file"] = save_html(
-                source_folder,
-                name,
-                html,
-            )
-
-            races = discover_race_links(
-                html, final_url
-            )
-
-            entry["races"] = races
-
-            entry["status"] = (
-                "race_links_found"
-                if races
-                else "race_links_not_parsed"
-            )
-
-            for race in races:
-                race_rows.append({
-                    "date": race_date,
-                    "state": meeting["state"],
-                    "meeting": name,
-                    "metro": meeting["metro"],
-                    "race": race["race"],
-                    "race_name": race["race_name"],
-                    "race_url": race["race_url"],
-                })
-
-        except Exception as error:
-            entry["status"] = "source_failed"
-            manifest["errors"].append(
-                f"{name}: "
-                f"{type(error).__name__}: {error}"
-            )
-
-        manifest["meetings"].append(entry)
-
-        # Avoid excessive requests to the source.
-        time.sleep(0.5)
-
-    if race_rows:
-        manifest["status"] = "race_links_found"
-    elif manifest["status"] != "source_failed":
-        manifest["status"] = "no_race_links"
-
-    manifest["meeting_count"] = len(
-        manifest["meetings"]
-    )
-    manifest["race_link_count"] = len(
-        race_rows
-    )
-
-    (folder / "manifest.json").write_text(
+    (
+        folder / "manifest.json"
+    ).write_text(
         json.dumps(
             manifest,
             indent=2,
-            ensure_ascii=False,
         ),
         encoding="utf-8",
     )
 
-    write_csv(
-        folder / "races.csv",
-        race_rows,
-        [
-            "date", "state", "meeting",
-            "metro", "race", "race_name",
-            "race_url",
-        ],
-    )
-
-    print(
-        json.dumps(
-            {
-                "date": race_date,
-                "status": manifest["status"],
-                "meetings": manifest["meeting_count"],
-                "race_links": manifest["race_link_count"],
-                "errors": manifest["errors"],
-            },
-            indent=2,
-        )
-    )
-
-    # A source failure must be visible in Actions.
-    if manifest["status"] != "race_links_found":
-        raise SystemExit(
-            "Collection incomplete: inspect manifest.json"
-        )
+    return manifest
 
 
 def main():
@@ -438,8 +298,9 @@ def main():
 
     parser.add_argument(
         "--date",
-        default=tomorrow_in_sydney(),
+        default=tomorrow_sydney(),
     )
+
     parser.add_argument(
         "--output",
         default="data",
@@ -449,10 +310,33 @@ def main():
 
     dt.date.fromisoformat(args.date)
 
-    collect(
-        args.date,
-        Path(args.output),
+    html, source_url = fetch_programme(
+        args.date
     )
+
+    result = parse_programme(
+        html,
+        source_url,
+        args.date,
+    )
+
+    manifest = save_results(
+        result,
+        html,
+        args.output,
+    )
+
+    print(
+        json.dumps(
+            manifest,
+            indent=2,
+        )
+    )
+
+    if not result["races"]:
+        raise SystemExit(
+            "No eligible race links found"
+        )
 
 
 if __name__ == "__main__":
