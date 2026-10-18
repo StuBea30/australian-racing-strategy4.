@@ -1,13 +1,14 @@
 
-name: Australian Racing Strategy 4.0 - Daily Automation
+name: Australian Racing Strategy 4.0 - Telegram Report
 
 on:
   workflow_dispatch:
+
   schedule:
-    # 21:30 UK time in winter (GMT)
+    # 9:30pm UK winter time (GMT)
     - cron: "30 21 * * *"
 
-    # 21:30 UK time in summer (BST)
+    # 9:30pm UK summer time (BST)
     - cron: "30 20 * * *"
 
 permissions:
@@ -18,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  collect-score-report:
+  collect-score-send:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -27,7 +28,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
 
     steps:
-      - name: Check UK schedule and calculate racing date
+      - name: Calculate racing date and UK schedule
         id: racing_date
         shell: bash
         run: |
@@ -39,35 +40,44 @@ jobs:
           london = ZoneInfo("Europe/London")
           now = datetime.now(timezone.utc).astimezone(london)
 
-          manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-
-          # Two UTC schedules are needed because GitHub cron
-          # does not automatically adjust for British Summer Time.
-          #
-          # Only the run that falls in the 21:30 UK local-time
-          # window is allowed to continue.
-          #
-          # GitHub scheduled jobs may start several minutes late.
-
-          correct_window = (
-              now.hour == 21
-              and now.minute >= 30
+          manual = (
+              os.environ.get("GITHUB_EVENT_NAME")
+              == "workflow_dispatch"
           )
 
-          should_run = manual or correct_window
+          # GitHub cron runs in UTC.
+          # Two triggers cover GMT and BST.
+          # Only the appropriate UK evening run proceeds.
+          #
+          # A scheduled run delayed into the next UK hour
+          # is allowed until 22:29 local time.
 
-          tomorrow = (now + timedelta(days=1)).date()
-          racing_date = tomorrow.isoformat()
+          scheduled_window = (
+              (now.hour == 21 and now.minute >= 30)
+              or now.hour == 22 and now.minute < 30
+          )
+
+          should_run = manual or scheduled_window
+
+          racing_date = (
+              now + timedelta(days=1)
+          ).date().isoformat()
 
           print("Current UK time:", now.isoformat())
           print("Racing date:", racing_date)
           print("Manual run:", manual)
           print("Run permitted:", should_run)
 
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"date={racing_date}\n")
+          with open(
+              os.environ["GITHUB_OUTPUT"], "a"
+          ) as output:
               output.write(
-                  f"should_run={'true' if should_run else 'false'}\n"
+                  f"date={racing_date}\n"
+              )
+              output.write(
+                  "should_run="
+                  + ("true" if should_run else "false")
+                  + "\n"
               )
           PY
 
@@ -89,7 +99,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Collect tomorrow's racing programme
+      - name: Collect Australian racing programme
         if: steps.racing_date.outputs.should_run == 'true'
         run: |
           python collect_racing.py \
@@ -103,7 +113,7 @@ jobs:
             --date "${{ steps.racing_date.outputs.date }}" \
             --output data
 
-      - name: Score every runner using Strategy 4.0
+      - name: Score all runners using Strategy 4.0
         if: steps.racing_date.outputs.should_run == 'true'
         run: |
           python score_racing.py \
@@ -111,12 +121,7 @@ jobs:
             --input data \
             --output reports
 
-      - name: Display top three in GitHub Actions
-        if: steps.racing_date.outputs.should_run == 'true'
-        run: |
-          cat "reports/${{ steps.racing_date.outputs.date }}/top_three_provisional.md"
-
-      - name: Publish report to GitHub Actions summary
+      - name: Publish report to GitHub summary
         if: steps.racing_date.outputs.should_run == 'true'
         shell: bash
         run: |
@@ -130,8 +135,18 @@ jobs:
           if [ -f "$REPORT" ]; then
             cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "No completed scoring report available." >> "$GITHUB_STEP_SUMMARY"
+            echo "No report available." >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Send racing selections to Telegram
+        if: steps.racing_date.outputs.should_run == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python send_telegram.py \
+            --date "${{ steps.racing_date.outputs.date }}" \
+            --reports reports
 
       - name: Upload racing data and reports
         if: always() && steps.racing_date.outputs.should_run == 'true'
@@ -144,8 +159,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Explain skipped duplicate schedule
+      - name: Explain skipped schedule
         if: steps.racing_date.outputs.should_run != 'true'
         run: |
-          echo "This scheduled trigger is outside the UK 21:30 window."
-          echo "Skipping to avoid duplicate daily processing."
+          echo "Outside the UK evening processing window."
+          echo "Skipping this scheduled trigger."
