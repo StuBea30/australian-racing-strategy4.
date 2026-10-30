@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       race_date:
-        description: 'Australian racing date (YYYY-MM-DD); leave blank for tomorrow in Sydney'
+        description: 'Australian racing date (YYYY-MM-DD); blank means tomorrow in Sydney'
         required: false
         type: string
   schedule:
-    # 21:30 UK time: 20:30 UTC during BST, 21:30 UTC during GMT.
+    # UK 21:30 is UTC 20:30 in BST and UTC 21:30 in GMT.
     - cron: '30 20,21 * * *'
 
 permissions:
@@ -21,35 +21,36 @@ concurrency:
 jobs:
   racing:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Determine whether to run and choose racing date
+      - name: Choose racing date and UK scheduled run
         id: dates
         shell: bash
         env:
           MANUAL_DATE: ${{ inputs.race_date }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ '${{ github.event_name }}' == 'schedule' ]]; then
+          if [[ "$EVENT_NAME" == 'schedule' ]]; then
             uk_clock="$(TZ=Europe/London date +%H:%M)"
             if [[ "$uk_clock" != '21:30' ]]; then
-              echo "run_report=false" >> "$GITHUB_OUTPUT"
-              echo "Skipping: UK clock is $uk_clock, not 21:30"
+              echo 'run_report=false' >> "$GITHUB_OUTPUT"
+              echo "Skipped because UK clock is $uk_clock"
               exit 0
             fi
           fi
-          echo "run_report=true" >> "$GITHUB_OUTPUT"
+          echo 'run_report=true' >> "$GITHUB_OUTPUT"
           if [[ -n "$MANUAL_DATE" ]]; then
-            if [[ ! "$MANUAL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+            if [[ ! "$MANUAL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || \
                [[ "$(date -d "$MANUAL_DATE" +%F 2>/dev/null)" != "$MANUAL_DATE" ]]; then
-              echo 'Invalid race_date; use YYYY-MM-DD' >&2
+              echo 'Invalid date: use YYYY-MM-DD' >&2
               exit 1
             fi
             race_date="$MANUAL_DATE"
@@ -59,53 +60,80 @@ jobs:
           echo "race_date=$race_date" >> "$GITHUB_OUTPUT"
           echo "Racing date: $race_date"
 
-      - name: Validate Strategy 4.1 scripts and source data
+      - name: Install collector dependencies
         if: steps.dates.outputs.run_report == 'true'
+        run: python -m pip install -r requirements.txt
+
+      - name: Check Python scripts
+        if: steps.dates.outputs.run_report == 'true'
+        run: python -m py_compile collect_racing.py collect_runners.py score_racing.py send_telegram.py
+
+      - name: Collect Australian race programme
+        if: steps.dates.outputs.run_report == 'true'
+        run: |
+          python collect_racing.py --date '${{ steps.dates.outputs.race_date }}' --output data
+
+      - name: Collect runners and historical starts
+        if: steps.dates.outputs.run_report == 'true'
+        run: |
+          python collect_runners.py --date '${{ steps.dates.outputs.race_date }}' --output data
+
+      - name: Validate collection completeness
+        if: steps.dates.outputs.run_report == 'true'
+        env:
+          RACE_DATE: ${{ steps.dates.outputs.race_date }}
         shell: bash
         run: |
-          python -m py_compile score_racing.py send_telegram.py
-          race_date='${{ steps.dates.outputs.race_date }}'
-          for filename in runners.csv past_starts.csv; do
-            if [[ ! -s "data/$race_date/$filename" ]]; then
-              echo "ERROR: Missing or empty data/$race_date/$filename" >&2
-              echo 'A racecard collection step must run before scoring.' >&2
-              exit 1
-            fi
-          done
+          python - <<'PY'
+          import csv, json, os
+          from pathlib import Path
+          folder = Path('data') / os.environ['RACE_DATE']
+          programme = json.loads((folder / 'manifest.json').read_text())
+          runners = json.loads((folder / 'runners_manifest.json').read_text())
+          requested = int(programme.get('race_link_count', 0))
+          if requested <= 0:
+              raise SystemExit('No races collected; Telegram send blocked')
+          if programme.get('unknown'):
+              raise SystemExit('Unparsed meeting rows; coverage cannot be trusted')
+          if runners.get('errors') or runners.get('races_collected') != requested:
+              raise SystemExit('Incomplete runner collection; Telegram send blocked')
+          for filename in ('races.csv', 'runners.csv', 'past_starts.csv'):
+              path = folder / filename
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f'Missing or empty {path}')
+          with (folder / 'runners.csv').open(newline='', encoding='utf-8') as f:
+              actual_races = {(r['date'], r['state'], r['meeting'], r['race']) for r in csv.DictReader(f)}
+          if len(actual_races) != requested:
+              raise SystemExit(f'Race coverage mismatch: {len(actual_races)} of {requested}')
+          print(f'Validated {requested} collected races; scratchings remain unverified')
+          PY
 
-      - name: Generate Strategy 4.1 top ten
+      - name: Score Strategy 4.1 and rank top ten
         if: steps.dates.outputs.run_report == 'true'
-        shell: bash
         run: |
-          python score_racing.py \
-            --date '${{ steps.dates.outputs.race_date }}' \
-            --input data \
-            --output reports
+          python score_racing.py --date '${{ steps.dates.outputs.race_date }}' --input data --output reports
 
-      - name: Preview Telegram message
+      - name: Preview Telegram report
         if: steps.dates.outputs.run_report == 'true'
-        shell: bash
         run: |
-          python send_telegram.py \
-            --date '${{ steps.dates.outputs.race_date }}' \
-            --reports reports \
-            --dry-run
+          python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --reports reports --dry-run
 
-      - name: Upload report artifacts
-        if: steps.dates.outputs.run_report == 'true'
+      - name: Upload diagnostics and reports
+        if: always() && steps.dates.outputs.run_report == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: strategy41-top-ten-${{ steps.dates.outputs.race_date }}
-          path: reports/${{ steps.dates.outputs.race_date }}/
+          name: racing-strategy41-${{ steps.dates.outputs.race_date }}
+          path: |
+            data/${{ steps.dates.outputs.race_date }}/manifest.json
+            data/${{ steps.dates.outputs.race_date }}/runners_manifest.json
+            reports/${{ steps.dates.outputs.race_date }}/
+          if-no-files-found: warn
           retention-days: 30
 
-      - name: Send top ten to Telegram
+      - name: Send Strategy 4.1 top ten to Telegram
         if: steps.dates.outputs.run_report == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        shell: bash
         run: |
-          python send_telegram.py \
-            --date '${{ steps.dates.outputs.race_date }}' \
-            --reports reports
+          python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --reports reports
