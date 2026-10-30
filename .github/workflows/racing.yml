@@ -1,23 +1,27 @@
-
-name: Australian Racing Strategy 4.0
+name: Australian Racing Strategy 4.1 - Top Ten
 
 on:
   workflow_dispatch:
+    inputs:
+      race_date:
+        description: 'Australian racing date (YYYY-MM-DD); leave blank for tomorrow in Sydney'
+        required: false
+        type: string
   schedule:
-    - cron: "0 */3 * * *"
+    # 21:30 UK time: 20:30 UTC during BST, 21:30 UTC during GMT.
+    - cron: '30 20,21 * * *'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: australian-racing-strategy4
+  group: australian-racing-strategy41
   cancel-in-progress: false
 
 jobs:
   racing:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -25,49 +29,83 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Determine next Australian racing date
+      - name: Determine whether to run and choose racing date
         id: dates
         shell: bash
+        env:
+          MANUAL_DATE: ${{ inputs.race_date }}
         run: |
-          echo "race_date=$(TZ=Australia/Sydney date -d tomorrow +%F)" >> "$GITHUB_OUTPUT"
+          if [[ '${{ github.event_name }}' == 'schedule' ]]; then
+            uk_clock="$(TZ=Europe/London date +%H:%M)"
+            if [[ "$uk_clock" != '21:30' ]]; then
+              echo "run_report=false" >> "$GITHUB_OUTPUT"
+              echo "Skipping: UK clock is $uk_clock, not 21:30"
+              exit 0
+            fi
+          fi
+          echo "run_report=true" >> "$GITHUB_OUTPUT"
+          if [[ -n "$MANUAL_DATE" ]]; then
+            if [[ ! "$MANUAL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+               [[ "$(date -d "$MANUAL_DATE" +%F 2>/dev/null)" != "$MANUAL_DATE" ]]; then
+              echo 'Invalid race_date; use YYYY-MM-DD' >&2
+              exit 1
+            fi
+            race_date="$MANUAL_DATE"
+          else
+            race_date="$(TZ=Australia/Sydney date -d tomorrow +%F)"
+          fi
+          echo "race_date=$race_date" >> "$GITHUB_OUTPUT"
+          echo "Racing date: $race_date"
 
-      - name: Check scoring engine
-        run: |
-          python -m py_compile strategy4.py
-          python strategy4.py --help
-
-      - name: Create reports directory
-        run: |
-          mkdir -p reports
-
-      - name: Generate provisional report
-        run: |
-          python strategy4.py report \
-            "${{ steps.dates.outputs.race_date }}" \
-            --output reports
-
-      - name: Save reports and database
+      - name: Validate Strategy 4.1 scripts and source data
+        if: steps.dates.outputs.run_report == 'true'
         shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python -m py_compile score_racing.py send_telegram.py
+          race_date='${{ steps.dates.outputs.race_date }}'
+          for filename in runners.csv past_starts.csv; do
+            if [[ ! -s "data/$race_date/$filename" ]]; then
+              echo "ERROR: Missing or empty data/$race_date/$filename" >&2
+              echo 'A racecard collection step must run before scoring.' >&2
+              exit 1
+            fi
+          done
 
-          git add reports/ strategy4.sqlite
+      - name: Generate Strategy 4.1 top ten
+        if: steps.dates.outputs.run_report == 'true'
+        shell: bash
+        run: |
+          python score_racing.py \
+            --date '${{ steps.dates.outputs.race_date }}' \
+            --input data \
+            --output reports
 
-          if ! git diff --cached --quiet; then
-            git commit -m "Update Australian racing analysis"
-            git push
-          else
-            echo "No new changes to save."
-          fi
+      - name: Preview Telegram message
+        if: steps.dates.outputs.run_report == 'true'
+        shell: bash
+        run: |
+          python send_telegram.py \
+            --date '${{ steps.dates.outputs.race_date }}' \
+            --reports reports \
+            --dry-run
 
       - name: Upload report artifacts
+        if: steps.dates.outputs.run_report == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: racing-report-${{ steps.dates.outputs.race_date }}
-          path: |
-            reports/
-            strategy4.sqlite
+          name: strategy41-top-ten-${{ steps.dates.outputs.race_date }}
+          path: reports/${{ steps.dates.outputs.race_date }}/
           retention-days: 30
+
+      - name: Send top ten to Telegram
+        if: steps.dates.outputs.run_report == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          python send_telegram.py \
+            --date '${{ steps.dates.outputs.race_date }}' \
+            --reports reports
