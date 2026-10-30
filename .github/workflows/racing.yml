@@ -1,5 +1,4 @@
 name: Australian Racing Strategy 4.1 - Top Ten
-
 on:
   workflow_dispatch:
     inputs:
@@ -11,14 +10,11 @@ on:
     # UK 21:30 is UTC 20:30 in BST and UTC 21:30 in GMT.
     # Scheduled jobs can start late; accept the 21:00-21:59 UK hour.
     - cron: '30 20,21 * * *'
-
 permissions:
   contents: read
-
 concurrency:
   group: australian-racing-strategy41
   cancel-in-progress: false
-
 jobs:
   racing:
     runs-on: ubuntu-latest
@@ -26,12 +22,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Choose racing date and UK scheduled run
         id: dates
         shell: bash
@@ -60,25 +54,18 @@ jobs:
           fi
           echo "race_date=$race_date" >> "$GITHUB_OUTPUT"
           echo "Racing date: $race_date"
-
       - name: Install collector dependencies
         if: steps.dates.outputs.run_report == 'true'
         run: python -m pip install -r requirements.txt
-
       - name: Check Python scripts
         if: steps.dates.outputs.run_report == 'true'
         run: python -m py_compile collect_racing.py collect_runners.py score_racing.py send_telegram.py
-
       - name: Collect Australian race programme
         if: steps.dates.outputs.run_report == 'true'
-        run: |
-          python collect_racing.py --date '${{ steps.dates.outputs.race_date }}' --output data
-
+        run: python collect_racing.py --date '${{ steps.dates.outputs.race_date }}' --output data
       - name: Collect runners and historical starts
         if: steps.dates.outputs.run_report == 'true'
-        run: |
-          python collect_runners.py --date '${{ steps.dates.outputs.race_date }}' --output data
-
+        run: python collect_runners.py --date '${{ steps.dates.outputs.race_date }}' --output data
       - name: Validate collection completeness
         if: steps.dates.outputs.run_report == 'true'
         env:
@@ -108,34 +95,28 @@ jobs:
               raise SystemExit(f'Race coverage mismatch: {len(actual_races)} of {requested}')
           print(f'Validated {requested} collected races; scratchings remain unverified')
           PY
-
       - name: Score Strategy 4.1 and rank top ten
         if: steps.dates.outputs.run_report == 'true'
-        run: |
-          python score_racing.py --date '${{ steps.dates.outputs.race_date }}' --input data --output reports
-
+        run: python score_racing.py --date '${{ steps.dates.outputs.race_date }}' --input data --output reports
       - name: Preview Telegram report
         if: steps.dates.outputs.run_report == 'true'
-        run: |
-          python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --reports reports --dry-run
-
+        run: python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --reports reports --dry-run
       - name: Upload diagnostics and reports
         if: always() && steps.dates.outputs.run_report == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: racing-strategy41-${{ steps.dates.outputs.race_date }}
-          path: |            data/${{ steps.dates.outputs.race_date }}/runners.csv
-            data/${{ steps.dates.outputs.race_date }}/past_starts.csv
+          path: |
             data/${{ steps.dates.outputs.race_date }}/manifest.json
             data/${{ steps.dates.outputs.race_date }}/runners_manifest.json
+            data/${{ steps.dates.outputs.race_date }}/runners.csv
+            data/${{ steps.dates.outputs.race_date }}/past_starts.csv
             reports/${{ steps.dates.outputs.race_date }}/
           if-no-files-found: warn
           retention-days: 30
-
       - name: Send Strategy 4.1 top ten to Telegram
         if: steps.dates.outputs.run_report == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --reports reports
+        run: python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --reports reports
