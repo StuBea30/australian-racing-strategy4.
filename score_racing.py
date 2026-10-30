@@ -83,6 +83,23 @@ def going_type(value):
     return None
 
 
+def is_trial(row):
+    """Exclude trials/jump-outs from official racing form, even with a placing."""
+    classification = str(row.get('Class') or '').lower()
+    return bool(re.search(r'\b(?:trial|jump[ -]?out|barrier trial|practice)\b', classification))
+
+
+def valid_record(value):
+    """Reject dates or malformed records rather than accepting embedded text."""
+    match = re.fullmatch(r'\s*(\d+)\s*:\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*', str(value or ''))
+    if not match:
+        return None
+    starts, wins, seconds, thirds = map(int, match.groups())
+    if starts <= 0 or wins + seconds + thirds > starts:
+        return None
+    return starts, wins, seconds, thirds
+
+
 def historical_rows(rows,race_date):
     found=[]
     for row in rows:
@@ -109,7 +126,9 @@ def evidence_blend(observed, count, prior=NEUTRAL, strength=2):
 def score_runner(horse, history):
     rdate=date_value(horse.get('date'))
     if rdate is None: raise ValueError('Runner has invalid date')
-    past=historical_rows(history,rdate)
+    history_all=historical_rows(history,rdate)
+    trials=[r for r in history_all if is_trial(r)]
+    past=[r for r in history_all if not is_trial(r)]
     last6=past[:6]
     notes=[]
     current_class=race_class(horse.get('race_class'))
@@ -153,7 +172,7 @@ def score_runner(horse, history):
             difference=abs(old-target)/target
             similarity=clamp(1-difference/0.45)
             ds.append((0.5+similarity*(perf-0.5),0.85**i*max(0.15,similarity)))
-    dr=record_quality(record(horse.get('distance_record')))
+    dr=record_quality(valid_record(horse.get('distance_record')))
     distance_evidence=weighted(ds)
     if distance_evidence is not None and dr is not None: distance_evidence=0.75*distance_evidence+0.25*dr
     elif dr is not None: distance_evidence=dr
@@ -169,7 +188,7 @@ def score_runner(horse, history):
             perf=performance(r)
             if going_type(r.get('Cond.'))==surface and perf is not None:
                 gs.append((perf,0.85**i))
-    gr=record_quality(record(horse.get(str(surface)+'_record'))) if surface else None
+    gr=record_quality(valid_record(horse.get(str(surface)+'_record'))) if surface else None
     going_evidence=weighted(gs)
     if going_evidence is not None and gr is not None: going_evidence=0.75*going_evidence+0.25*gr
     elif gr is not None: going_evidence=gr
@@ -191,20 +210,25 @@ def score_runner(horse, history):
                 prior_gap=(d-previous).days
                 if abs(prior_gap-days)<=max(14,days*0.4): prep.append((perf,0.85**i))
     fitness_evidence=weighted(prep)
-    firstup=record_quality(record(horse.get('first_up_record') or horse.get('firstup_record')))
-    secondup=record_quality(record(horse.get('second_up_record') or horse.get('secondup_record')))
+    firstup=record_quality(valid_record(horse.get('first_up') or horse.get('first_up_record') or horse.get('firstup_record')))
+    secondup=record_quality(valid_record(horse.get('second_up') or horse.get('second_up_record') or horse.get('secondup_record')))
     if days is not None and days>=70 and firstup is not None:
         fitness_evidence=0.6*firstup+0.4*(fitness_evidence if fitness_evidence is not None else NEUTRAL)
     elif days is not None and days<70 and secondup is not None:
         fitness_evidence=0.35*secondup+0.65*(fitness_evidence if fitness_evidence is not None else NEUTRAL)
+    # Trials are preparation indicators only; never treat a trial placing as
+    # competitive form or as a win at the target distance/going/class.
+    recent_trials = [r for r in trials if (rdate-date_value(r.get('Date'))).days <= 45]
     fitness_count=len(prep)+(2 if firstup is not None or secondup is not None else 0)
+    if recent_trials:
+        notes.append(f'{len(recent_trials)} recent trial(s) recorded (preparation only)')
     fitness=WEIGHTS['fitness']*evidence_blend(fitness_evidence,fitness_count,strength=3) if days is not None else None
     if fitness is None: notes.append('fitness evidence unavailable')
     elif fitness_count==0: notes.append('fitness neutral; no comparable preparation evidence')
 
     return {'form':form,'class':class_score,'distance':distance_score,
             'going':going_score,'fitness':fitness,'days_since_last':days,
-            'evidence_starts':len(past),'form_samples':len(fs),'class_samples':len(cs),
+            'evidence_starts':len(past),'trial_starts':len(trials),'form_samples':len(fs),'class_samples':len(cs),
             'distance_samples':distance_count,'going_samples':going_count,
             'fitness_samples':fitness_count,'notes':notes}
 
@@ -266,7 +290,7 @@ def main():
             # Compare carried weight to horse's own prior successful weights
             # only when such weights are present in historical CSV.
             successful=[]
-            for h in history[:8]:
+            for h in [h for h in historical_rows(history,race_date) if not is_trial(h)][:8]:
                 p=past_finish(h.get('Place')); oldw=number(h.get('Weight') or h.get('Wgt'))
                 if p and p[0]<=3 and oldw is not None: successful.append(oldw)
             weight_component=clamp(0.5+0.035*(sum(successful)/len(successful)-w)) if successful and w is not None else None
@@ -282,7 +306,7 @@ def main():
             # phantom points or penalise a horse for an untried distance.
             confidence=0.35*min(1,s['form_samples']/4)+0.30*min(1,s['class_samples']/4)+0.15*min(1,s['distance_samples']/3)+0.10*min(1,s['going_samples']/3)+0.10*min(1,s['fitness_samples']/2)
             status='PROVISIONAL - SCRATCHINGS UNVERIFIED'
-            if coverage<99.999 or s['form_samples']<3 or s['class_samples']<2 or confidence<0.60:
+            if coverage<99.999 or s['evidence_starts']<3 or s['form_samples']<3 or s['class_samples']<2 or confidence<0.70:
                 status='INSUFFICIENT DATA - DO NOT SELECT'
             if (r.get('scratching_status') or '').strip().lower() in ('scratched','withdrawn'):
                 status='SCRATCHED - EXCLUDED'
@@ -298,7 +322,7 @@ def main():
                     'barrier_weight_points':round(s['barrier_weight'],2) if s['barrier_weight'] is not None else '',
                     'fitness_points':round(s['fitness'],2) if s['fitness'] is not None else '',
                     'days_since_last':s['days_since_last'] if s['days_since_last'] is not None else '',
-                    'evidence_starts':s['evidence_starts'],'evidence_confidence':round(confidence,3),
+                    'evidence_starts':s['evidence_starts'],'trial_starts':s['trial_starts'],'evidence_confidence':round(confidence,3),
                     'status':status,'notes':'; '.join(s['notes']),'rank':'','gap_to_second':''}
             scored.append(result)
         scored.sort(key=lambda x:(-x['score'],-x['coverage_points'],x['horse']))
@@ -328,7 +352,7 @@ def main():
     write_csv(out/'top_three_provisional.csv',races[:3],cols)
     manifest={'date':args.date,'races_with_runners':len(groups),'runners_scored':len(ranked),
               'races_with_two_eligible_runners':len(races),'provisional_top_ten':len(races[:10]),
-              'model':'Strategy 4.1 refined experimental v2 (NOT back-tested)',
+              'model':'Strategy 4.1 refined experimental v3, trials excluded from race form (NOT back-tested)',
               'weights':WEIGHTS,'scratchings_verified':False,'betting_recommendations':False}
     (out/'scoring_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
     lines=[f'# Strategy 4.1 — {args.date}','','**PROVISIONAL ONLY. Scratchings unverified; not betting recommendations.**',
@@ -339,7 +363,8 @@ def main():
         lines.append(f"| {i} | {r['meeting']} | {r['race']} | {r['first_horse']} | {r['first_score']:.2f} | {r['second_horse']} | {r['second_score']:.2f} | {r['gap']:.2f} | {r['points'] or 'No bet'} | {r['minimum_win_odds'] or '-'} |")
     if not races: lines.append('No eligible two-runner comparisons; no selections.')
     lines+=['','Top ten ranked by gap, not filtered by odds.',
-            'Only fully covered races with adequate evidence are ranked.',
+            'Only fully covered races with >=3 competitive historical starts per runner and adequate evidence are ranked.',
+            'Trials are preparation evidence only; never counted as competitive races.',
             'Ratings are unvalidated heuristics, not win probabilities.',
             'Opponent ratings, claims and track bias are not inferred from missing data.',
             'Scratchings and late track changes must be verified.']
