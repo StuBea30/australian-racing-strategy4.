@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strategy 4.1 revised provisional scoring engine (experimental, not back-tested).
+"""Strategy 4.1 evidence-calibrated scoring engine v4 (experimental, not back-tested).
 
 Drop-in replacement for score_racing.py. Uses only fields in the existing racecard
 and past-start CSVs. Unavailable opponent ratings, claims, trials and track bias
@@ -46,12 +46,14 @@ def race_class(value):
     if re.search(r'\b(?:G2|GROUP\s*2)\b',s): return 9.
     if re.search(r'\b(?:G3|GROUP\s*3)\b',s): return 8.
     if re.search(r'\b(?:LISTED|LR)\b',s): return 7.
+    if re.search(r'\b(?:PICNIC|TROPHY|AMATEUR)\b',s): return 1.2
     if re.search(r'\bOPEN\b',s): return 6.
     m = re.search(r'\b(?:BM|BENCHMARK)\s*(\d+)',s)
     if m: return clamp((int(m.group(1))-50)/50,0,1)*2.5+3.5
     m = re.search(r'\b(?:CL|CLASS)\s*([1-6])\b',s)
     if m: return 2.5 + 0.55*int(m.group(1))
     if re.search(r'\b(?:MDN|MAIDEN)\b',s): return 2.
+    if re.search(r'\b(?:HANDICAP|HCP)\b',s) and re.search(r'\b(?:PICNIC|TROPHY)\b',s): return 1.2
     return None
 
 
@@ -60,6 +62,21 @@ def past_finish(value):
     if not m: return None
     p,n=map(int,m.groups())
     return (p,n) if 1<=p<=n else None
+
+
+def is_picnic(row):
+    """Detect low-grade picnic/amateur starts only when the source labels them."""
+    label = ' '.join(str(row.get(k) or '') for k in ('Class', 'Race', 'Race Name', 'Meeting'))
+    return bool(re.search(r'\b(?:picnic|trophy|amateur)\b', label, re.I))
+
+
+def field_quality(row):
+    """Small fields provide weaker evidence of a strong placing."""
+    finish = past_finish(row.get('Place'))
+    if not finish:
+        return 0.5
+    _, size = finish
+    return clamp((size - 4) / 8)  # 4 runners -> 0; 12+ -> 1
 
 
 def performance(row):
@@ -135,15 +152,22 @@ def score_runner(horse, history):
     target=number(horse.get('distance_m'))
     surface=going_type(horse.get('track'))
 
-    # Form: finishing position, field size and valid beaten margins; higher
-    # historical class modestly adjusts strength of opposition.
+    # Form: results are contextualised by field size and class. A small-field
+    # picnic placing must not receive the same credit as a BM50 placing.
     fs=[]
     for i,r in enumerate(last6):
         perf=performance(r)
         if perf is None: continue
         oldclass=race_class(r.get('Class'))
-        strength=clamp(0.5+0.045*(oldclass-5),0.3,0.75) if oldclass is not None else 0.5
-        adjusted=clamp(perf+0.18*(strength-0.5))
+        class_delta=(oldclass-current_class) if oldclass is not None and current_class is not None else 0
+        context=clamp(0.5+0.055*class_delta,0.18,0.80)
+        field=field_quality(r)
+        # Adjust performance toward neutral based on race quality, not by
+        # assigning every picnic runner a poor score automatically.
+        reliability=clamp(0.55+0.25*field+0.20*context,0.4,1)
+        adjusted=clamp(0.5+(perf-0.5)*reliability+0.10*(context-0.5))
+        if is_picnic(r):
+            adjusted=clamp(adjusted-0.10*max(0,perf-0.5)/0.5)
         fs.append((adjusted,0.8**i))
     form=WEIGHTS['form']*evidence_blend(weighted(fs),len(fs),strength=2)
     if len(fs)<3: notes.append('limited form evidence')
@@ -155,8 +179,10 @@ def score_runner(horse, history):
         for i,r in enumerate(last6):
             old=race_class(r.get('Class')); perf=performance(r)
             if old is None or perf is None: continue
-            level=clamp(0.5+0.115*(old-current_class))
-            quality=clamp(0.48*level+0.52*perf)
+            level=clamp(0.5+0.14*(old-current_class))
+            quality=clamp(0.65*level+0.35*perf)
+            if is_picnic(r):
+                quality=clamp(quality-0.08)
             cs.append((quality,0.8**i))
     class_score=WEIGHTS['class']*evidence_blend(weighted(cs),len(cs),strength=2) if current_class is not None else None
     if class_score is None: notes.append('class evidence unavailable')
@@ -352,7 +378,7 @@ def main():
     write_csv(out/'top_three_provisional.csv',races[:3],cols)
     manifest={'date':args.date,'races_with_runners':len(groups),'runners_scored':len(ranked),
               'races_with_two_eligible_runners':len(races),'provisional_top_ten':len(races[:10]),
-              'model':'Strategy 4.1 refined experimental v3, trials excluded from race form (NOT back-tested)',
+              'model':'Strategy 4.1 evidence-calibrated v4; picnic/field-size adjustments (NOT back-tested)',
               'weights':WEIGHTS,'scratchings_verified':False,'betting_recommendations':False}
     (out/'scoring_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
     lines=[f'# Strategy 4.1 — {args.date}','','**PROVISIONAL ONLY. Scratchings unverified; not betting recommendations.**',
