@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strategy 4.1 evidence-calibrated scoring engine v4 (experimental, not back-tested).
+"""Strategy 4.1 named-opponent historical scoring v9 (experimental, not back-tested).
 
 Drop-in replacement for score_racing.py. Uses only fields in the existing racecard
 and past-start CSVs. Unavailable opponent ratings, claims, trials and track bias
@@ -10,6 +10,7 @@ import csv
 import json
 import re
 from collections import defaultdict
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 
@@ -41,19 +42,25 @@ def record(value):
 
 
 def race_class(value):
+    """Conservative race-grade scale; avoid assuming every OPEN is elite.
+
+    Numeric benchmark grade is the strongest comparable grade signal.
+    Picnic/trophy and quality races are recognised rather than silently
+    treated as unknown. OPEN without prize/opposition evidence stays neutral.
+    """
     s = str(value or '').upper().strip()
+    if re.search(r'\b(?:TRPY\s*\w*|TROPHY|PICNIC|AMATEUR)\b', s): return 1.2
     if re.search(r'\b(?:G1|GROUP\s*1)\b',s): return 10.
     if re.search(r'\b(?:G2|GROUP\s*2)\b',s): return 9.
     if re.search(r'\b(?:G3|GROUP\s*3)\b',s): return 8.
     if re.search(r'\b(?:LISTED|LR)\b',s): return 7.
-    if re.search(r'\b(?:PICNIC|TROPHY|AMATEUR)\b',s): return 1.2
-    if re.search(r'\bOPEN\b',s): return 6.
-    m = re.search(r'\b(?:BM|BENCHMARK)\s*(\d+)',s)
+    m = re.search(r'\b(?:BM\s*0\s*-\s*|BM\s*|BENCHMARK\s*)(\d+)\b',s)
     if m: return clamp((int(m.group(1))-50)/50,0,1)*2.5+3.5
     m = re.search(r'\b(?:CL|CLASS)\s*([1-6])\b',s)
-    if m: return 2.5 + 0.55*int(m.group(1))
+    if m: return 2.5+0.55*int(m.group(1))
     if re.search(r'\b(?:MDN|MAIDEN)\b',s): return 2.
-    if re.search(r'\b(?:HANDICAP|HCP)\b',s) and re.search(r'\b(?:PICNIC|TROPHY)\b',s): return 1.2
+    if re.search(r'\b(?:QLTY|QUALITY)\b',s): return 6.2
+    if re.search(r'\bOPEN\b',s): return 5.2
     return None
 
 
@@ -67,7 +74,7 @@ def past_finish(value):
 def is_picnic(row):
     """Detect low-grade picnic/amateur starts only when the source labels them."""
     label = ' '.join(str(row.get(k) or '') for k in ('Class', 'Race', 'Race Name', 'Meeting'))
-    return bool(re.search(r'\b(?:picnic|trophy|amateur)\b', label, re.I))
+    return bool(re.search(r'\b(?:picnic|trophy|amateur|trpy\s*\w*)\b', label, re.I))
 
 
 def field_quality(row):
@@ -140,7 +147,61 @@ def evidence_blend(observed, count, prior=NEUTRAL, strength=2):
     return (count*observed+strength*prior)/(count+strength)
 
 
-def score_runner(horse, history):
+def normalise_name(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def result_names(value):
+    """Extract only explicitly named first/second/third finishers."""
+    s = str(value or "")
+    matches = re.findall(r"(?:^|\s)([123])\.\s*(.*?)(?=\s+[123]\.\s*|$)", s)
+    return [name.strip(' ,.;') for _, name in matches if name.strip(' ,.;')]
+
+
+class HistoricalOpponents:
+    """Evaluate named opponents using form strictly before the shared race date.
+
+    Unmatched or thinly evidenced rivals contribute nothing (not a low rating).
+    Prize money is not read or used anywhere in this model.
+    """
+    def __init__(self, histories):
+        self.by_name=defaultdict(dict)
+        for row in histories:
+            if is_trial(row): continue
+            d=date_value(row.get('Date'))
+            name=normalise_name(row.get('horse'))
+            if d and name:
+                key=(d,normalise_name(row.get('Track')),str(row.get('Distance')),str(row.get('Place')))
+                self.by_name[name][key]=row
+        self.by_name={k: sorted(v.values(),key=lambda r:date_value(r['Date'])) for k,v in self.by_name.items()}
+
+    @lru_cache(maxsize=120000)
+    def rating_before(self, name, cutoff):
+        rows=self.by_name.get(name,[])
+        prior=[r for r in rows if date_value(r.get('Date')) < cutoff]
+        if len(prior)<2: return None
+        samples=[]
+        for r in prior[-5:]:
+            perf=performance(r)
+            grade=race_class(r.get('Class'))
+            if perf is None or grade is None: continue
+            # Two independent observed dimensions: prior grade and result.
+            samples.append(0.65*clamp(grade/10)+0.35*perf)
+        if len(samples)<2: return None
+        return sum(samples)/len(samples)
+
+    def context(self, row):
+        cutoff=date_value(row.get('Date'))
+        if cutoff is None: return None
+        names=result_names(row.get('Result'))
+        own=normalise_name(row.get('horse'))
+        values=[self.rating_before(normalise_name(n),cutoff) for n in names if normalise_name(n)!=own]
+        values=[v for v in values if v is not None]
+        if not values: return None
+        return sum(values)/len(values),len(values)
+
+
+def score_runner(horse, history, opponent_index=None):
     rdate=date_value(horse.get('date'))
     if rdate is None: raise ValueError('Runner has invalid date')
     history_all=historical_rows(history,rdate)
@@ -179,10 +240,17 @@ def score_runner(horse, history):
         for i,r in enumerate(last6):
             old=race_class(r.get('Class')); perf=performance(r)
             if old is None or perf is None: continue
-            level=clamp(0.5+0.14*(old-current_class))
-            quality=clamp(0.65*level+0.35*perf)
+            level=clamp(0.5+0.19*(old-current_class))
+            quality=clamp(0.86*level+0.14*perf)
             if is_picnic(r):
-                quality=clamp(quality-0.08)
+                quality=clamp(quality-0.10)
+            # Measured rival quality is an additional, bounded class signal.
+            # No missing-rival penalty; do not infer ability from prize money.
+            if opponent_index is not None:
+                context=opponent_index.context(r)
+                if context is not None:
+                    rival_quality,matched=context
+                    quality=clamp(quality+0.24*(rival_quality-0.5)*min(1,matched/2))
             cs.append((quality,0.8**i))
     class_score=WEIGHTS['class']*evidence_blend(weighted(cs),len(cs),strength=2) if current_class is not None else None
     if class_score is None: notes.append('class evidence unavailable')
@@ -288,6 +356,7 @@ def main():
     if not runners: ap.error('No runners')
     histories_by_key=defaultdict(list)
     for h in histories: histories_by_key[tuple(h.get(k,'') for k in KEY)].append(h)
+    opponent_index=HistoricalOpponents(histories)
     groups=defaultdict(list)
     for r in runners:
         if date_value(r.get('date'))==race_date:
@@ -307,20 +376,20 @@ def main():
                 for date_text in (args.date,race_date.strftime('%d/%m/%Y'),race_date.strftime('%d/%m/%y')):
                     history=histories_by_key[(date_text,r['meeting'],r['race'],r['horse'])]
                     if history: break
-            s=score_runner(r,history)
+            s=score_runner(r,history,opponent_index)
             b=number(r.get('barrier')); w=number(r.get('weight_kg'))
             # Draw is mildly informative only; without course-specific bias
             # avoid treating an inside barrier as a guaranteed advantage.
             draw=clamp(1-(b-1)/max(1,max_barrier-1)) if b is not None and b>0 and max_barrier else None
-            draw_component=0.5+0.30*(draw-0.5) if draw is not None else None
+            draw_component=0.5+0.20*(draw-0.5) if draw is not None else None
             # Compare carried weight to horse's own prior successful weights
             # only when such weights are present in historical CSV.
             successful=[]
             for h in [h for h in historical_rows(history,race_date) if not is_trial(h)][:8]:
                 p=past_finish(h.get('Place')); oldw=number(h.get('Weight') or h.get('Wgt'))
                 if p and p[0]<=3 and oldw is not None: successful.append(oldw)
-            weight_component=clamp(0.5+0.035*(sum(successful)/len(successful)-w)) if successful and w is not None else None
-            components=[(v,wt) for v,wt in ((draw_component,0.6),(weight_component,0.4)) if v is not None]
+            weight_component=clamp(0.5+0.022*(sum(successful)/len(successful)-w)) if successful and w is not None else None
+            components=[(v,wt) for v,wt in ((draw_component,0.5),(weight_component,0.5)) if v is not None]
             # Claims are not assumed where the collector has no claim field.
             s['barrier_weight']=WEIGHTS['barrier_weight']*weighted(components) if components else None
             if weight_component is None: s['notes'].append('prior successful weights/claims unverified')
@@ -378,7 +447,7 @@ def main():
     write_csv(out/'top_three_provisional.csv',races[:3],cols)
     manifest={'date':args.date,'races_with_runners':len(groups),'runners_scored':len(ranked),
               'races_with_two_eligible_runners':len(races),'provisional_top_ten':len(races[:10]),
-              'model':'Strategy 4.1 evidence-calibrated v4; picnic/field-size adjustments (NOT back-tested)',
+              'model':'Strategy 4.1 v6; grade parsing and class evidence (NOT back-tested)',
               'weights':WEIGHTS,'scratchings_verified':False,'betting_recommendations':False}
     (out/'scoring_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
     lines=[f'# Strategy 4.1 — {args.date}','','**PROVISIONAL ONLY. Scratchings unverified; not betting recommendations.**',
