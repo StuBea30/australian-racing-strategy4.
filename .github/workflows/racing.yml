@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       race_date:
-        description: 'Australian racing date (YYYY-MM-DD); blank means tomorrow in Sydney'
+        description: 'Australian racing date (YYYY-MM-DD); blank means current date in Sydney'
         required: false
         type: string
   schedule:
     # UK 21:30 is UTC 20:30 in BST and UTC 21:30 in GMT.
+    # Scheduled jobs can start late; accept the 21:00-21:59 UK hour.
     - cron: '30 20,21 * * *'
 
 permissions:
@@ -40,7 +41,7 @@ jobs:
         run: |
           if [[ "$EVENT_NAME" == 'schedule' ]]; then
             uk_clock="$(TZ=Europe/London date +%H:%M)"
-            if [[ "$uk_clock" != '21:30' ]]; then
+            if [[ "${uk_clock%%:*}" != '21' ]]; then
               echo 'run_report=false' >> "$GITHUB_OUTPUT"
               echo "Skipped because UK clock is $uk_clock"
               exit 0
@@ -55,7 +56,7 @@ jobs:
             fi
             race_date="$MANUAL_DATE"
           else
-            race_date="$(TZ=Australia/Sydney date -d tomorrow +%F)"
+            race_date="$(TZ=Australia/Sydney date +%F)"
           fi
           echo "race_date=$race_date" >> "$GITHUB_OUTPUT"
           echo "Racing date: $race_date"
