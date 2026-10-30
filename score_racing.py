@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strategy 4.1 named-opponent historical scoring v9 (experimental, not back-tested).
+"""Strategy 4.1 named-opponent historical scoring v10 (field integrity safeguards; not back-tested).
 
 Drop-in replacement for score_racing.py. Uses only fields in the existing racecard
 and past-start CSVs. Unavailable opponent ratings, claims, trials and track bias
@@ -345,6 +345,7 @@ def main():
     ap.add_argument('--date',required=True)
     ap.add_argument('--input',default='data')
     ap.add_argument('--output',default='reports')
+    ap.add_argument('--expected-fields',default='',help='Optional CSV with date,meeting,race,expected_runners; verified against independent racecards')
     args=ap.parse_args()
     race_date=date_value(args.date)
     if not race_date or race_date.isoformat()!=args.date: ap.error('--date must be YYYY-MM-DD')
@@ -354,6 +355,14 @@ def main():
     with (folder/'runners.csv').open(encoding='utf-8-sig',newline='') as f: runners=list(csv.DictReader(f))
     with (folder/'past_starts.csv').open(encoding='utf-8-sig',newline='') as f: histories=list(csv.DictReader(f))
     if not runners: ap.error('No runners')
+    expected_fields={}
+    if args.expected_fields:
+        with open(args.expected_fields,encoding='utf-8-sig',newline='') as f:
+            for e in csv.DictReader(f):
+                count=number(e.get('expected_runners'))
+                if count is not None and count>=2:
+                    expected_fields[(e.get('date',''),e.get('meeting','').strip().casefold(),str(e.get('race','')).strip())]=int(count)
+
     histories_by_key=defaultdict(list)
     for h in histories: histories_by_key[tuple(h.get(k,'') for k in KEY)].append(h)
     opponent_index=HistoricalOpponents(histories)
@@ -368,6 +377,8 @@ def main():
         barriers=[v for v in barriers if v is not None and v>0]
         max_barrier=max(barriers) if barriers else None
         scored=[]
+        expected=expected_fields.get((args.date,group_key[2].strip().casefold(),str(group_key[3])))
+        field_incomplete=expected is not None and len(group)<expected
         for r in group:
             key=tuple(r.get(k,'') for k in KEY)
             # Accommodate either date encoding in history/runner records.
@@ -432,22 +443,40 @@ def main():
             gap=round(first['score']-second['score'],2)
             first['gap_to_second']=gap
             points,minimum_odds=staking_rule(gap)
+            warnings=[]
+            if expected is None: warnings.append('FIELD COUNT NOT INDEPENDENTLY VERIFIED')
+            if field_incomplete:
+                warnings.append(f'INCOMPLETE FIELD: collected {len(group)} of {expected}')
+                points,minimum_odds=0,None
+            if len(eligible)<=3:
+                warnings.append(f'SMALL FIELD: {len(eligible)} active runners; gap needs independent review')
+            # Three-runner maiden victories can inflate a form advantage. Flag
+            # the actual evidence; do not manipulate six-factor weights or gaps.
+            leader_source=next((r for r in group if r['horse']==first['horse']),None)
+            if leader_source is not None:
+                k=tuple(leader_source.get(c,'') for c in KEY)
+                prior=historical_rows(histories_by_key[k],race_date)
+                for h in prior[:4]:
+                    finish=past_finish(h.get('Place'))
+                    if finish and finish[0]==1 and finish[1]<=3 and re.search(r'\b(?:MDN|MAIDEN)\b',str(h.get('Class','')),re.I):
+                        warnings.append('LEADER HAS WIN IN THREE-RUNNER MAIDEN: REVIEW GAP')
+                        break
             races.append({'points':points,'minimum_win_odds':minimum_odds,'date':first['date'],
                           'state':first['state'],'meeting':first['meeting'],'race':first['race'],
                           'race_name':first['race_name'],'first_horse':first['horse'],
                           'first_score':first['score'],'second_horse':second['horse'],
                           'second_score':second['score'],'gap':gap,'race_url':first['race_url'],
-                          'status':'PROVISIONAL - SCRATCHINGS UNVERIFIED'})
+                          'status':'INCOMPLETE FIELD - NO BET' if field_incomplete else 'PROVISIONAL - SCRATCHINGS UNVERIFIED', 'integrity_warnings':'; '.join(warnings), 'collected_runners':len(group), 'expected_runners':expected or ''})
     races.sort(key=lambda r:(-r['gap'],-r['first_score'],r['meeting'],int(number(r['race']) or 0)))
     out=Path(args.output)/args.date; out.mkdir(parents=True,exist_ok=True)
     write_csv(out/'all_runner_scores.csv',ranked,list(ranked[0]))
-    cols=['points','minimum_win_odds','date','state','meeting','race','race_name','first_horse','first_score','second_horse','second_score','gap','race_url','status']
+    cols=['points','minimum_win_odds','date','state','meeting','race','race_name','first_horse','first_score','second_horse','second_score','gap','race_url','status','integrity_warnings','collected_runners','expected_runners']
     write_csv(out/'race_rankings.csv',races,cols)
     write_csv(out/'top_ten_provisional.csv',races[:10],cols)
     write_csv(out/'top_three_provisional.csv',races[:3],cols)
     manifest={'date':args.date,'races_with_runners':len(groups),'runners_scored':len(ranked),
               'races_with_two_eligible_runners':len(races),'provisional_top_ten':len(races[:10]),
-              'model':'Strategy 4.1 v6; grade parsing and class evidence (NOT back-tested)',
+              'model':'Strategy 4.1 v10; v9 scoring plus field-integrity audit (NOT back-tested)',
               'weights':WEIGHTS,'scratchings_verified':False,'betting_recommendations':False}
     (out/'scoring_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
     lines=[f'# Strategy 4.1 — {args.date}','','**PROVISIONAL ONLY. Scratchings unverified; not betting recommendations.**',
