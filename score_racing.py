@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Strategy 4.0 provisional 100-point horse rankings from collected CSVs.
+"""Strategy 4.1 provisional 100-point horse rankings from collected CSVs.
 
 Model heuristics are transparent and NOT back-tested. Scratchings unverified:
 no output is a confirmed betting recommendation. Uses only observed CSV data.
@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-WEIGHTS = {'form': 30, 'class': 25, 'distance': 15, 'going': 15, 'barrier_weight': 10, 'fitness': 5}
+WEIGHTS = {'form': 30, 'class': 25, 'distance': 40/3, 'going': 40/3, 'barrier_weight': 40/3, 'fitness': 5}
 KEY = ('date', 'meeting', 'race', 'horse')
 
 
@@ -124,7 +124,7 @@ def score_runner(horse, history):
     dist_record = (0.25 + 0.75 * (dr[1] + 0.45 * dr[2] + 0.25 * dr[3]) / dr[0]) if dr and dr[0] else None
     distance_parts = [(dist_history, 0.7), (dist_record, 0.3)]
     distance_parts = [(v,w) for v,w in distance_parts if v is not None]
-    distance_score = 15 * sum(v*w for v,w in distance_parts)/sum(w for _,w in distance_parts) if distance_parts else None
+    distance_score = WEIGHTS['distance'] * sum(v*w for v,w in distance_parts)/sum(w for _,w in distance_parts) if distance_parts else None
     if distance_score is None: notes.append('distance evidence unavailable')
 
     # Going: same surface/condition historical performances and published records.
@@ -138,7 +138,7 @@ def score_runner(horse, history):
     going_rec = (0.25 + 0.75 * (rec[1] + 0.45 * rec[2] + 0.25 * rec[3]) / rec[0]) if rec and rec[0] else None
     parts = [(going_hist, 0.7), (going_rec, 0.3)]
     parts = [(v,w) for v,w in parts if v is not None]
-    going_score = 15 * sum(v*w for v,w in parts)/sum(w for _,w in parts) if parts else None
+    going_score = WEIGHTS['going'] * sum(v*w for v,w in parts)/sum(w for _,w in parts) if parts else None
     if going_score is None: notes.append('going evidence unavailable')
 
     # Barrier/weight: comparative score assigned at race level below.
@@ -161,6 +161,13 @@ def write_csv(path, rows, columns):
     with path.open('w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=columns, extrasaction='ignore')
         w.writeheader(); w.writerows(rows)
+
+
+def staking_rule(gap):
+    if gap >= 7: return 3, 1.60
+    if gap >= 5: return 2, 2.00
+    if gap >= 3: return 1, 3.00
+    return 0, None
 
 
 def main():
@@ -208,7 +215,7 @@ def main():
             wscore = (high_w-w)/max(0.1, high_w-low_w) if w is not None and low_w is not None else None
             components = [(bscore, 0.6), (wscore, 0.4)]
             components = [(v, weight) for v, weight in components if v is not None]
-            s['barrier_weight'] = 10*sum(v*weight for v,weight in components)/sum(weight for _,weight in components) if components else None
+            s['barrier_weight'] = WEIGHTS['barrier_weight']*sum(v*weight for v,weight in components)/sum(weight for _,weight in components) if components else None
             if s['barrier_weight'] is None: s['notes'].append('barrier/weight evidence unavailable')
             available = [k for k in WEIGHTS if s[k] is not None]
             observed = sum(s[k] for k in available)
@@ -239,12 +246,16 @@ def main():
         scored.sort(key=lambda r: (-r['score'], -r['coverage_points'], r['horse']))
         for i, r in enumerate(scored, 1): r['rank'] = i
         ranked.extend(scored)
-        eligible = [r for r in scored if r['status'] == 'PROVISIONAL - SCRATCHINGS UNVERIFIED']
+        eligible = [r for r in scored if r['status'] == 'PROVISIONAL - SCRATCHINGS UNVERIFIED' and abs(r['coverage_points'] - 100) < 0.00001]
+        # Do not compare a partial score with a complete score.
+        if len(eligible) != len([r for r in scored if r['status'] != 'SCRATCHED - EXCLUDED']):
+            continue
         if len(eligible) >= 2:
             first, second = eligible[:2]
             gap = round(first['score']-second['score'], 2)
             first['gap_to_second'] = gap
-            races.append({'date': first['date'], 'state': first['state'], 'meeting': first['meeting'],
+            points, minimum_odds = staking_rule(gap)
+            races.append({'points': points, 'minimum_win_odds': minimum_odds, 'date': first['date'], 'state': first['state'], 'meeting': first['meeting'],
                           'race': first['race'], 'race_name': first['race_name'],
                           'first_horse': first['horse'], 'first_score': first['score'],
                           'second_horse': second['horse'], 'second_score': second['score'],
@@ -255,22 +266,26 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     cols = list(ranked[0])
     write_csv(out/'all_runner_scores.csv', ranked, cols)
-    race_cols = ['date','state','meeting','race','race_name','first_horse','first_score','second_horse','second_score','gap','race_url','status']
+    race_cols = ['points','minimum_win_odds','date','state','meeting','race','race_name','first_horse','first_score','second_horse','second_score','gap','race_url','status']
     write_csv(out/'race_rankings.csv', races, race_cols)
+    write_csv(out/'top_ten_provisional.csv', races[:10], race_cols)
+    # Compatibility output for an existing workflow expecting this filename.
     write_csv(out/'top_three_provisional.csv', races[:3], race_cols)
     manifest = {'date': args.date, 'races_with_runners': len(groups), 'runners_scored': len(ranked),
-                'races_with_two_eligible_runners': len(races), 'provisional_top_three': len(races[:3]),
-                'model': 'Strategy 4.0 heuristic v1 (not back-tested)', 'weights': WEIGHTS,
+                'races_with_two_eligible_runners': len(races), 'provisional_top_ten': len(races[:10]),
+                'model': 'Strategy 4.1 heuristic v1 (not back-tested)', 'weights': WEIGHTS,
                 'scratchings_verified': False, 'betting_recommendations': False}
     (out/'scoring_manifest.json').write_text(json.dumps(manifest, indent=2)+'\n', encoding='utf-8')
-    lines = [f'# Strategy 4.0 — {args.date}', '', '**PROVISIONAL ONLY. Scratchings unverified; not betting recommendations.**',
+    lines = [f'# Strategy 4.1 — {args.date}', '', '**PROVISIONAL ONLY. Scratchings unverified; not betting recommendations.**',
              '', f"Scored {len(ranked)} runners across {len(groups)} races. {len(races)} races have two eligible scored runners.",
-             '', '| Rank | Meeting | Race | Leader | Score | Second | Score | Gap |',
-             '|---:|---|---:|---|---:|---|---:|---:|']
-    for i, r in enumerate(races[:3], 1):
-        lines.append(f"| {i} | {r['meeting']} | {r['race']} | {r['first_horse']} | {r['first_score']:.2f} | {r['second_horse']} | {r['second_score']:.2f} | {r['gap']:.2f} |")
+             '', '| Rank | Meeting | Race | Leader | Score | Second | Score | Gap | Band | Min win odds |',
+             '|---:|---|---:|---|---:|---|---:|---:|---|---:|']
+    for i, r in enumerate(races[:10], 1):
+        lines.append(f"| {i} | {r['meeting']} | {r['race']} | {r['first_horse']} | {r['first_score']:.2f} | {r['second_horse']} | {r['second_score']:.2f} | {r['gap']:.2f} | {r['points'] or 'No bet'} | {r['minimum_win_odds'] or '-'} |")
     if not races: lines.append('No eligible two-runner comparisons; no selections.')
-    lines += ['', 'Scores are deterministic heuristics based on available racecards, not validated probabilities.',
+    lines += ['', 'Top ten are ranked by gap without filtering by market odds.',
+              'Only races with complete factor scores for all non-scratched runners are ranked.',
+              'Scores are deterministic heuristics based on available racecards, not validated probabilities.',
               'Missing evidence receives zero points and is recorded in coverage_points.',
               'Scratchings and late track changes must be verified before any selections.']
     (out/'top_three_provisional.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
