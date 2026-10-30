@@ -124,7 +124,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: racing-strategy41-${{ steps.dates.outputs.race_date }}
-          path: |
+          path: |            data/${{ steps.dates.outputs.race_date }}/runners.csv
+            data/${{ steps.dates.outputs.race_date }}/past_starts.csv
             data/${{ steps.dates.outputs.race_date }}/manifest.json
             data/${{ steps.dates.outputs.race_date }}/runners_manifest.json
             reports/${{ steps.dates.outputs.race_date }}/
