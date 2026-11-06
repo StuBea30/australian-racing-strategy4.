@@ -1,71 +1,31 @@
 
-name: Strategy 4.1 Prize Money Live Probe
-
-on:
-  workflow_dispatch:
-    inputs:
-      racing_date:
-        description: "Australian racing date YYYY-MM-DD"
-        required: true
-        default: "2026-11-07"
-        type: string
-      race_limit:
-        description: "Number of races to test"
-        required: true
-        default: "1"
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
-
-permissions:
-  contents: read
-
-jobs:
-  probe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-
-      - name: Collect racing programme
+      - name: Select Flemington Race 7
         run: |
-          python collect_racing.py \
-            --date "${{ inputs.racing_date }}" \
-            --output data
+          python - <<'PY'
+          import csv
+          from pathlib import Path
 
-      - name: Collect historical runner data
-        continue-on-error: true
-        run: |
-          python collect_runners.py \
-            --date "${{ inputs.racing_date }}" \
-            --output data \
-            --limit "${{ inputs.race_limit }}" \
-            --delay 0
+          path = Path("data/${{ inputs.racing_date }}/races.csv")
 
-      - name: Audit prize money
-        if: always()
-        run: |
-          python audit_live_purses.py \
-            --date "${{ inputs.racing_date }}" \
-            --output data
+          with path.open(newline="", encoding="utf-8") as f:
+              rows = list(csv.DictReader(f))
+              columns = list(rows[0]) if rows else []
 
-      - name: Upload diagnostic results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: prize-money-live-probe
-          path: data/
-          retention-days: 7
-          if-no-files-found: warn
+          selected = [
+              r for r in rows
+              if r["meeting"].strip().lower() == "flemington"
+              and str(r["race"]).strip() == "7"
+          ]
+
+          if len(selected) != 1:
+              raise SystemExit(
+                  f"Expected one Flemington R7; found {len(selected)}"
+              )
+
+          with path.open("w", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=columns)
+              writer.writeheader()
+              writer.writerows(selected)
+
+          print("Selected Flemington Race 7")
+          PY
