@@ -12,9 +12,11 @@ from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
+from purse_data import extract_history_purse
+from track_states import infer_state
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; RacingStrategy4/1.0)', 'Accept': 'text/html'}
-FIELDS = ['date','state','meeting','race','race_url','race_name','distance_m','race_class','track','weather','horse_number','horse','barrier','form','trainer','jockey','weight_kg','rating','career','distance_record','good_record','soft_record','heavy_record','first_up','second_up','days_since_start','settling_position','comments','scratching_status','past_starts_count']
+FIELDS = ['date','state','meeting','race','race_url','race_name','distance_m','race_class','track','weather','horse_number','horse','barrier','form','trainer','jockey','weight_kg','rating','career','distance_record','good_record','soft_record','heavy_record','first_up','second_up','days_since_start','settling_position','comments','scratching_status','past_starts_count','race_prize_money']
 
 
 def clean(node):
@@ -50,6 +52,16 @@ def section_text(article, title):
         return ''
     sibling = h.find_next_sibling('div') or h.find_next_sibling('p')
     return clean(sibling)
+
+
+def extract_race_purse(facts):
+    from purse_data import parse_money_text
+    for key, value in facts.items():
+        if any(word in key for word in ('prize', 'purse', 'stake')):
+            parsed = parse_money_text(value)
+            if parsed is not None:
+                return str(parsed)
+    return None
 
 
 def parse_race(html, meta):
@@ -109,6 +121,13 @@ def parse_race(html, meta):
                 record = dict(zip(labels, (clean(c) for c in cells)))
                 record.update({'date':meta['date'],'meeting':meta['meeting'],'race':meta['race'],'horse':horse})
                 history.append(record)
+        for record in history:
+            # Preserve source columns and extract only explicitly labelled purses.
+            record['Prize Money AUD'] = extract_history_purse(record) or ''
+            state_text = record.get('State', '') or record.get('state', '')
+            if not state_text:
+                state_text = infer_state(record.get('Track', '')) or (meta['state'] if record.get('Track','').strip().casefold() == meta['meeting'].strip().casefold() else '')
+            record['Historical State'] = state_text
         histories.extend(history)
         rows.append({
             'date':meta['date'],'state':meta['state'],'meeting':meta['meeting'],
@@ -127,6 +146,7 @@ def parse_race(html, meta):
             'comments':section_text(article,'Comments'),
             'scratching_status':'unverified',
             'past_starts_count':len(history),
+            'race_prize_money':extract_race_purse(facts) or '',
         })
     return rows, histories
 
