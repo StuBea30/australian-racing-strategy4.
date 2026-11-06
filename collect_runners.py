@@ -1,15 +1,15 @@
 
 #!/usr/bin/env python3
-"""Collect Ladbrokes racecards and historical form for Strategy 4.1.
+"""Collect Ladbrokes runner histories for Australian Racing Strategy 4.1.
 
-Race eligibility:
+Rules:
 - Exclude maiden races.
-- Exclude races containing a first-time competitive starter.
+- Exclude races containing first-time competitive starters.
 - Trials and jump-outs do not count as competitive starts.
-- No age-based exclusions.
-- Scratchings handling remains unchanged.
-
-Excluded races are recorded in the collection manifest.
+- Do not exclude races because of runners' ages.
+- Capture advertised race-level prize money.
+- Preserve historical prize money and historical states.
+- Do not independently verify scratchings.
 """
 
 import argparse
@@ -51,11 +51,7 @@ def clean(node):
 def labelled(node, label):
     for li in node.select("header li"):
         strong = li.find("strong")
-        if (
-            strong
-            and clean(strong).rstrip(":").casefold()
-            == label.casefold()
-        ):
+        if strong and clean(strong).rstrip(":").casefold() == label.casefold():
             return clean(li).split(":", 1)[-1].strip()
     return ""
 
@@ -79,11 +75,10 @@ def stats(article):
     if grid is None:
         return result
 
-    for heading in grid.select("h6"):
-        value = heading.find_next_sibling("span")
-
+    for h6 in grid.select("h6"):
+        value = h6.find_next_sibling("span")
         if value:
-            result[clean(heading).casefold()] = clean(value)
+            result[clean(h6).casefold()] = clean(value)
 
     return result
 
@@ -109,10 +104,10 @@ def section_text(article, title):
 
 
 def is_trial(record):
-    """Identify non-competitive trials and jump-outs."""
-    description = " ".join(
-        str(record.get(field, ""))
-        for field in (
+    """Identify trials and jump-outs in historical form."""
+    text = " ".join(
+        str(record.get(key, ""))
+        for key in (
             "Class", "Race Name", "Race Type", "Type"
         )
     )
@@ -120,14 +115,13 @@ def is_trial(record):
     return bool(
         re.search(
             r"\b(?:trial|jump[\s-]?out|practice)\b",
-            description,
+            text,
             re.IGNORECASE,
         )
     )
 
 
 def is_maiden_race(race_class, race_name):
-    """Exclude races designated Maiden or MDN."""
     text = f"{race_class} {race_name}"
 
     return bool(
@@ -140,13 +134,11 @@ def is_maiden_race(race_class, race_name):
 
 
 def has_competitive_start(history, career):
-    """Determine whether a horse has previously raced officially.
+    """Require evidence of a previous official race start.
 
-    An explicit career record can establish a previous start.
-    Otherwise require at least one non-trial historical record.
-
-    Ambiguous evidence is not treated as proof of a start.
+    Trials and jump-outs are not competitive starts.
     """
+
     match = re.match(
         r"^\s*(\d+)\s*:\s*\d+\s*-\s*\d+\s*-\s*\d+\s*$",
         str(career or ""),
@@ -165,67 +157,71 @@ def has_competitive_start(history, career):
     return False
 
 
-def extract_race_purse(soup, facts):
-    """Read the current race's explicitly advertised total purse.
+def extract_race_purse(soup, heading, facts):
+    """Extract advertised total race prize money.
 
-    Do not substitute individual runner winnings or historical
-    race prize money.
+    Ladbrokes example:
+        <h3>Prize Money : $80,000</h3>
+
+    Allows spaces around the colon.
+    Does not use individual horse career winnings.
     """
+
+    if heading is not None:
+        for element in heading.select("h3"):
+            text = clean(element)
+
+            match = re.search(
+                r"\bPrize\s*Money\s*:\s*"
+                r"((?:A\$|AUD\s*|\$)?\s*"
+                r"[\d,]+(?:\.\d+)?\s*[kKmM]?)",
+                text,
+                re.IGNORECASE,
+            )
+
+            if match:
+                amount = parse_money_text(
+                    match.group(1).strip()
+                )
+
+                if amount is not None:
+                    return str(amount)
+
+    # Fallback to explicitly labelled race-level facts.
     for key, value in facts.items():
         if re.search(
-            r"\b(?:prize\s*money|prizemoney|prize|purse|stakes)\b",
-            key,
+            r"^(?:prize\s*money|prizemoney|"
+            r"total\s*prize|purse)$",
+            key.strip(),
             re.IGNORECASE,
         ):
-            parsed = parse_money_text(value)
+            amount = parse_money_text(value)
 
-            if parsed is not None:
-                return str(parsed)
-
-    # Search race-level sections only, never runner articles.
-    for section in soup.select("section"):
-        if section.select_one('article[id^="runner-"]'):
-            continue
-
-        for item in section.select("li"):
-            label = item.find("strong")
-
-            if label is None:
-                continue
-
-            key = clean(label).rstrip(":").strip()
-
-            if not re.search(
-                r"\b(?:prize\s*money|prizemoney|prize|purse|stakes)\b",
-                key,
-                re.IGNORECASE,
-            ):
-                continue
-
-            value = clean(item).split(":", 1)[-1].strip()
-            parsed = parse_money_text(value)
-
-            if parsed is not None:
-                return str(parsed)
+            if amount is not None:
+                return str(amount)
 
     return ""
 
 
 def race_facts(soup):
-    """Extract facts from the race header and metadata sections."""
+    """Read labelled race facts, excluding runner articles."""
     result = {}
 
-    for item in soup.select("section > ul li"):
-        label = item.find("strong")
-
-        if label is None:
+    for section in soup.select("section"):
+        if section.select_one('article[id^="runner-"]'):
             continue
 
-        key = clean(label).rstrip(":").casefold()
-        value = clean(item).split(":", 1)[-1].strip()
+        for li in section.select("ul li"):
+            strong = li.find("strong")
 
-        if key:
-            result[key] = value
+            if strong is None:
+                continue
+
+            key = clean(strong).rstrip(":").casefold()
+            value = clean(li).split(":", 1)[-1].strip()
+
+            if key:
+                result[key] = value
 
     return result
 
@@ -245,13 +241,16 @@ def parse_race(html, meta):
 
     heading = header.find_parent("header")
 
-    race_name = clean(
-        heading.select_one("h2")
-    ) if heading else ""
+    race_name = (
+        clean(heading.select_one("h2"))
+        if heading else ""
+    )
 
     facts = race_facts(soup)
 
-    current_purse = extract_race_purse(soup, facts)
+    current_purse = extract_race_purse(
+        soup, heading, facts
+    )
 
     rows = []
     histories = []
@@ -282,15 +281,14 @@ def parse_race(html, meta):
 
         for paragraph in article.select("p"):
             if clean(paragraph) == "Rating":
-                parent = paragraph.parent
-                spans = parent.find_all("span")
+                spans = paragraph.parent.find_all("span")
                 rating = clean(spans[-1]) if spans else ""
                 break
 
         days = ""
 
-        for heading in article.select("h5"):
-            text = clean(heading)
+        for h in article.select("h5"):
+            text = clean(h)
 
             if text.startswith("Last Starts"):
                 found = re.search(
@@ -328,8 +326,8 @@ def parse_race(html, meta):
             ):
                 continue
 
-            for table_row in table.select("tbody tr"):
-                cells = table_row.find_all(
+            for tr in table.select("tbody tr"):
+                cells = tr.find_all(
                     "td", recursive=False
                 )
 
@@ -372,7 +370,9 @@ def parse_race(html, meta):
                 ):
                     historical_state = meta["state"]
 
-                record["Historical State"] = historical_state
+                record["Historical State"] = (
+                    historical_state
+                )
 
                 history.append(record)
 
@@ -437,15 +437,18 @@ def main():
     parser.add_argument(
         "--date", required=True
     )
+
     parser.add_argument(
         "--output", default="data"
     )
+
     parser.add_argument(
         "--limit",
         type=int,
         default=0,
         help="Optional number of races for testing",
     )
+
     parser.add_argument(
         "--delay",
         type=float,
@@ -496,6 +499,7 @@ def main():
                 runners[0].get("race_class", "")
                 if runners else ""
             )
+
             race_name = (
                 runners[0].get("race_name", "")
                 if runners else ""
@@ -544,7 +548,8 @@ def main():
                 print(
                     f"{race['meeting']} R{race['race']}: "
                     f"{len(runners)} runners, "
-                    f"{len(histories)} previous records"
+                    f"{len(histories)} previous records, "
+                    f"purse={runners[0]['race_prize_money']}"
                 )
 
         except (
@@ -595,15 +600,17 @@ def main():
     summary = {
         "date": args.date,
         "races_requested": len(races),
-        "races_collected": (
-            len(races) - len(errors)
-        ),
+        "races_collected": len(races) - len(errors),
         "races_excluded": len(exclusions),
         "races_eligible": (
             len(races) - len(errors) - len(exclusions)
         ),
         "runners": len(all_runners),
         "past_starts": len(all_histories),
+        "runners_with_today_purse": sum(
+            bool(r["race_prize_money"])
+            for r in all_runners
+        ),
         "excluded_races": exclusions,
         "errors": errors,
         "scratchings_verified": False,
