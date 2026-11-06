@@ -1,20 +1,30 @@
 
-name: Strategy 4.1 Prize Money Live Probe
+name: Strategy 4.1 - Prize Money and Scoring Test
 
 on:
   workflow_dispatch:
     inputs:
       racing_date:
-        description: "Australian racing date YYYY-MM-DD"
-        required: true
-        default: "2026-11-07"
+        description: "Australian race date (YYYY-MM-DD); blank = next Sydney date"
+        required: false
         type: string
+      race_limit:
+        description: "Number of races to test (1-5)"
+        required: false
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+          - "5"
 
 permissions:
   contents: read
 
 jobs:
-  probe:
+  strategy41_test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -28,155 +38,170 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt
 
-      - name: Collect racing programme
+      - name: Check Python syntax
         run: |
-          python collect_racing.py \
-            --date "${{ inputs.racing_date }}" \
-            --output data
+          python -m py_compile \
+            collect_racing.py \
+            collect_runners.py \
+            purse_data.py \
+            track_states.py \
+            prize_grading.py \
+            score_racing.py
 
-      - name: Select Flemington Race 7
+      - name: Validate prize-money thresholds
         run: |
           python - <<'PY'
-          import csv
-          from pathlib import Path
+          import json
+          from prize_grading import validate_minima
 
-          date = "${{ inputs.racing_date }}"
-          path = Path("data") / date / "races.csv"
+          with open("purse_thresholds.json", encoding="utf-8") as f:
+              config = json.load(f)
 
-          if not path.exists():
-              raise SystemExit(
-                  f"Race file not found: {path}"
-              )
+          minima = validate_minima(
+              config["standard_minima_aud"]
+          )
 
-          with path.open(
-              newline="", encoding="utf-8-sig"
-          ) as file:
-              reader = csv.DictReader(file)
-              columns = reader.fieldnames or []
-              rows = list(reader)
-
-          print("Available columns:", columns)
-          print("Total races:", len(rows))
-
-          def find_column(candidates):
-              lookup = {
-                  c.strip().lower(): c
-                  for c in columns
-              }
-              for candidate in candidates:
-                  if candidate.lower() in lookup:
-                      return lookup[candidate.lower()]
-              return None
-
-          meeting_col = find_column([
-              "meeting", "track", "venue",
-              "course", "racecourse"
-          ])
-
-          race_col = find_column([
-              "race", "race_no", "race_number",
-              "race_num", "number"
-          ])
-
-          if not meeting_col or not race_col:
-              raise SystemExit(
-                  "Could not identify meeting/race columns. "
-                  f"Available columns: {columns}"
-              )
-
-          selected = [
-              row for row in rows
-              if "flemington" in str(
-                  row.get(meeting_col, "")
-              ).strip().lower()
-              and str(
-                  row.get(race_col, "")
-              ).strip().lstrip("0") == "7"
-          ]
-
-          if len(selected) != 1:
-              print("Sample race rows:")
-              for row in rows[:10]:
-                  print(row)
-              raise SystemExit(
-                  "Expected exactly one Flemington R7; "
-                  f"found {len(selected)}"
-              )
-
-          with path.open(
-              "w", newline="", encoding="utf-8"
-          ) as file:
-              writer = csv.DictWriter(
-                  file, fieldnames=columns
-              )
-              writer.writeheader()
-              writer.writerows(selected)
-
-          print("Selected Flemington Race 7")
-          print(selected[0])
+          print("Configured standard AUD thresholds:", minima)
+          print("WA, SA and TAS receive a 15% reduction.")
           PY
 
-      - name: Collect historical runner data
-        continue-on-error: true
+      - name: Run targeted grading tests
+        run: |
+          python -m unittest test_prize_grading -v
+
+      - name: Resolve Australian racing date
+        id: date
+        env:
+          REQUESTED_DATE: ${{ inputs.racing_date }}
+        run: |
+          python - <<'PY'
+          import datetime
+          import os
+          from zoneinfo import ZoneInfo
+
+          requested = os.environ.get(
+              "REQUESTED_DATE", ""
+          ).strip()
+
+          if requested:
+              datetime.date.fromisoformat(requested)
+              date = requested
+          else:
+              today = datetime.datetime.now(
+                  ZoneInfo("Australia/Sydney")
+              ).date()
+              date = (
+                  today + datetime.timedelta(days=1)
+              ).isoformat()
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+              encoding="utf-8"
+          ) as f:
+              f.write(f"date={date}\n")
+
+          print("Testing Australian race date:", date)
+          PY
+
+      - name: Collect race programme
+        run: |
+          python collect_racing.py \
+            --date "${{ steps.date.outputs.date }}" \
+            --output data
+
+      - name: Collect runner histories
         run: |
           python collect_runners.py \
-            --date "${{ inputs.racing_date }}" \
+            --date "${{ steps.date.outputs.date }}" \
             --output data \
-            --limit 1 \
+            --limit "${{ inputs.race_limit }}" \
             --delay 0
 
-      - name: Audit prize money
+      - name: Audit collected prize money
         if: always()
         run: |
           python audit_live_purses.py \
-            --date "${{ inputs.racing_date }}" \
+            --date "${{ steps.date.outputs.date }}" \
             --output data
 
-      - name: Inspect actual collected data
-        if: always()
+      - name: Run Strategy 4.1 scoring
+        run: |
+          python score_racing.py \
+            --date "${{ steps.date.outputs.date }}" \
+            --input data \
+            --output reports \
+            --purse-thresholds purse_thresholds.json
+
+      - name: Check scoring outputs
         run: |
           python - <<'PY'
           import csv
+          import os
           from pathlib import Path
 
-          folder = Path(
-              "data/${{ inputs.racing_date }}"
-          )
+          date = os.environ["RACING_DATE"]
+          folder = Path("reports") / date
 
-          for name in [
-              "races.csv",
-              "runners.csv",
-              "past_starts.csv"
-          ]:
-              path = folder / name
-              print(f"\n=== {name} ===")
+          required = [
+              "all_runner_scores.csv",
+              "race_rankings.csv",
+              "top_ten_provisional.csv",
+              "top_three_provisional.csv",
+              "scoring_manifest.json",
+              "top_three_provisional.md",
+          ]
 
-              if not path.exists():
-                  print("FILE NOT FOUND")
-                  continue
+          missing = [
+              name for name in required
+              if not (folder / name).is_file()
+          ]
 
-              with path.open(
-                  newline="", encoding="utf-8-sig"
-              ) as file:
-                  reader = csv.DictReader(file)
-                  print("Columns:", reader.fieldnames)
-                  rows = list(reader)
+          if missing:
+              raise SystemExit(
+                  "Missing scoring outputs: "
+                  + ", ".join(missing)
+              )
 
-              print("Rows:", len(rows))
+          with (folder / "all_runner_scores.csv").open(
+              newline="", encoding="utf-8"
+          ) as f:
+              runners = list(csv.DictReader(f))
 
-              for row in rows[:5]:
-                  print(row)
+          with (folder / "race_rankings.csv").open(
+              newline="", encoding="utf-8"
+          ) as f:
+              rankings = list(csv.DictReader(f))
+
+          print("Runners scored:", len(runners))
+          print("Eligible race rankings:", len(rankings))
+
+          if not runners:
+              raise SystemExit(
+                  "FAIL: No runner scores were produced."
+              )
+
+          if not rankings:
+              raise SystemExit(
+                  "FAIL: No eligible race rankings. "
+                  "Inspect class, prize-money and "
+                  "evidence coverage."
+              )
+
+          print("Scoring output check passed.")
           PY
+        env:
+          RACING_DATE: ${{ steps.date.outputs.date }}
 
-      - name: Upload diagnostic results
+      - name: Upload diagnostic and scoring reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: flemington-r7-prize-money-test
-          path: data/
+          name: strategy41-prize-money-scoring-test
+          path: |
+            data/
+            reports/
           retention-days: 7
           if-no-files-found: warn
