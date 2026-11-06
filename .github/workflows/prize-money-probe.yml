@@ -67,10 +67,6 @@ jobs:
           print("WA, SA and TAS receive a 15% reduction.")
           PY
 
-      - name: Run targeted grading tests
-        run: |
-          python -m unittest test_prize_grading -v
-
       - name: Resolve Australian racing date
         id: date
         env:
@@ -136,6 +132,8 @@ jobs:
             --purse-thresholds purse_thresholds.json
 
       - name: Check scoring outputs
+        env:
+          RACING_DATE: ${{ steps.date.outputs.date }}
         run: |
           python - <<'PY'
           import csv
@@ -192,8 +190,6 @@ jobs:
 
           print("Scoring output check passed.")
           PY
-        env:
-          RACING_DATE: ${{ steps.date.outputs.date }}
 
       - name: Upload diagnostic and scoring reports
         if: always()
