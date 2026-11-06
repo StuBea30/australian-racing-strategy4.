@@ -1,31 +1,182 @@
 
+name: Strategy 4.1 Prize Money Live Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      racing_date:
+        description: "Australian racing date YYYY-MM-DD"
+        required: true
+        default: "2026-11-07"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout test branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Collect racing programme
+        run: |
+          python collect_racing.py \
+            --date "${{ inputs.racing_date }}" \
+            --output data
+
       - name: Select Flemington Race 7
         run: |
           python - <<'PY'
           import csv
           from pathlib import Path
 
-          path = Path("data/${{ inputs.racing_date }}/races.csv")
+          date = "${{ inputs.racing_date }}"
+          path = Path("data") / date / "races.csv"
 
-          with path.open(newline="", encoding="utf-8") as f:
-              rows = list(csv.DictReader(f))
-              columns = list(rows[0]) if rows else []
+          if not path.exists():
+              raise SystemExit(
+                  f"Race file not found: {path}"
+              )
+
+          with path.open(
+              newline="", encoding="utf-8-sig"
+          ) as file:
+              reader = csv.DictReader(file)
+              columns = reader.fieldnames or []
+              rows = list(reader)
+
+          print("Available columns:", columns)
+          print("Total races:", len(rows))
+
+          def find_column(candidates):
+              lookup = {
+                  c.strip().lower(): c
+                  for c in columns
+              }
+              for candidate in candidates:
+                  if candidate.lower() in lookup:
+                      return lookup[candidate.lower()]
+              return None
+
+          meeting_col = find_column([
+              "meeting", "track", "venue",
+              "course", "racecourse"
+          ])
+
+          race_col = find_column([
+              "race", "race_no", "race_number",
+              "race_num", "number"
+          ])
+
+          if not meeting_col or not race_col:
+              raise SystemExit(
+                  "Could not identify meeting/race columns. "
+                  f"Available columns: {columns}"
+              )
 
           selected = [
-              r for r in rows
-              if r["meeting"].strip().lower() == "flemington"
-              and str(r["race"]).strip() == "7"
+              row for row in rows
+              if "flemington" in str(
+                  row.get(meeting_col, "")
+              ).strip().lower()
+              and str(
+                  row.get(race_col, "")
+              ).strip().lstrip("0") == "7"
           ]
 
           if len(selected) != 1:
+              print("Sample race rows:")
+              for row in rows[:10]:
+                  print(row)
               raise SystemExit(
-                  f"Expected one Flemington R7; found {len(selected)}"
+                  "Expected exactly one Flemington R7; "
+                  f"found {len(selected)}"
               )
 
-          with path.open("w", newline="", encoding="utf-8") as f:
-              writer = csv.DictWriter(f, fieldnames=columns)
+          with path.open(
+              "w", newline="", encoding="utf-8"
+          ) as file:
+              writer = csv.DictWriter(
+                  file, fieldnames=columns
+              )
               writer.writeheader()
               writer.writerows(selected)
 
           print("Selected Flemington Race 7")
+          print(selected[0])
           PY
+
+      - name: Collect historical runner data
+        continue-on-error: true
+        run: |
+          python collect_runners.py \
+            --date "${{ inputs.racing_date }}" \
+            --output data \
+            --limit 1 \
+            --delay 0
+
+      - name: Audit prize money
+        if: always()
+        run: |
+          python audit_live_purses.py \
+            --date "${{ inputs.racing_date }}" \
+            --output data
+
+      - name: Inspect actual collected data
+        if: always()
+        run: |
+          python - <<'PY'
+          import csv
+          from pathlib import Path
+
+          folder = Path(
+              "data/${{ inputs.racing_date }}"
+          )
+
+          for name in [
+              "races.csv",
+              "runners.csv",
+              "past_starts.csv"
+          ]:
+              path = folder / name
+              print(f"\n=== {name} ===")
+
+              if not path.exists():
+                  print("FILE NOT FOUND")
+                  continue
+
+              with path.open(
+                  newline="", encoding="utf-8-sig"
+              ) as file:
+                  reader = csv.DictReader(file)
+                  print("Columns:", reader.fieldnames)
+                  rows = list(reader)
+
+              print("Rows:", len(rows))
+
+              for row in rows[:5]:
+                  print(row)
+          PY
+
+      - name: Upload diagnostic results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flemington-r7-prize-money-test
+          path: data/
+          retention-days: 7
+          if-no-files-found: warn
