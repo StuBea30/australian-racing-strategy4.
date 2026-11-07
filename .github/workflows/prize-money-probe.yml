@@ -1,34 +1,29 @@
 
-name: Strategy 4.1 Prize Money Live Probe
+name: Strategy 4.1 - Prize Money and Scoring Test
 
 on:
   workflow_dispatch:
     inputs:
       racing_date:
-        description: "Australian racing date YYYY-MM-DD"
-        required: true
-        default: "2026-11-07"
+        description: "Australian race date (YYYY-MM-DD); blank = next Sydney date"
+        required: false
         type: string
       race_limit:
-        description: "Number of races to test"
-        required: true
-        default: "1"
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
+        description: "Number of races to test (1-100)"
+        required: false
+        default: "76"
+        type: number
 
 permissions:
   contents: read
 
 jobs:
-  probe:
+  strategy41_test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: Checkout test branch
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -39,33 +34,175 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Collect racing programme
+      - name: Check Python syntax
+        run: |
+          python -m py_compile \
+            collect_racing.py \
+            collect_runners.py \
+            purse_data.py \
+            track_states.py \
+            prize_grading.py \
+            score_racing.py
+
+      - name: Validate prize-money thresholds
+        run: |
+          python - <<'PY'
+          import json
+          from prize_grading import validate_minima
+
+          with open("purse_thresholds.json", encoding="utf-8") as f:
+              config = json.load(f)
+
+          minima = validate_minima(config["standard_minima_aud"])
+
+          print("Configured standard AUD thresholds:", minima)
+          print("WA, SA and TAS receive a 15% reduction.")
+          PY
+
+      - name: Resolve Australian racing date
+        id: date
+        env:
+          REQUESTED_DATE: ${{ inputs.racing_date }}
+        run: |
+          python - <<'PY'
+          import datetime
+          import os
+          from zoneinfo import ZoneInfo
+
+          requested = os.environ.get("REQUESTED_DATE", "").strip()
+
+          if requested:
+              datetime.date.fromisoformat(requested)
+              date = requested
+          else:
+              today = datetime.datetime.now(
+                  ZoneInfo("Australia/Sydney")
+              ).date()
+              date = (
+                  today + datetime.timedelta(days=1)
+              ).isoformat()
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+              encoding="utf-8"
+          ) as f:
+              f.write(f"date={date}\n")
+
+          print("Testing Australian race date:", date)
+          PY
+
+      - name: Validate race limit
+        env:
+          RACE_LIMIT: ${{ inputs.race_limit }}
+        run: |
+          python - <<'PY'
+          import os
+
+          limit = int(os.environ["RACE_LIMIT"])
+          if not 1 <= limit <= 100:
+              raise SystemExit(
+                  "Race limit must be between 1 and 100."
+              )
+          print("Race limit:", limit)
+          PY
+
+      - name: Collect race programme
         run: |
           python collect_racing.py \
-            --date "${{ inputs.racing_date }}" \
+            --date "${{ steps.date.outputs.date }}" \
             --output data
 
-      - name: Collect historical runner data
-        continue-on-error: true
+      - name: Collect runner histories
         run: |
           python collect_runners.py \
-            --date "${{ inputs.racing_date }}" \
+            --date "${{ steps.date.outputs.date }}" \
             --output data \
             --limit "${{ inputs.race_limit }}" \
             --delay 0
 
-      - name: Audit prize money
+      - name: Audit collected prize money
         if: always()
         run: |
           python audit_live_purses.py \
-            --date "${{ inputs.racing_date }}" \
+            --date "${{ steps.date.outputs.date }}" \
             --output data
 
-      - name: Upload diagnostic results
+      - name: Run Strategy 4.1 scoring
+        run: |
+          python score_racing.py \
+            --date "${{ steps.date.outputs.date }}" \
+            --input data \
+            --output reports \
+            --purse-thresholds purse_thresholds.json
+
+      - name: Check scoring outputs
+        env:
+          RACING_DATE: ${{ steps.date.outputs.date }}
+        run: |
+          python - <<'PY'
+          import csv
+          import os
+          from pathlib import Path
+
+          date = os.environ["RACING_DATE"]
+          folder = Path("reports") / date
+
+          required = [
+              "all_runner_scores.csv",
+              "race_rankings.csv",
+              "top_ten_provisional.csv",
+              "top_three_provisional.csv",
+              "scoring_manifest.json",
+              "top_three_provisional.md",
+          ]
+
+          missing = [
+              name for name in required
+              if not (folder / name).is_file()
+          ]
+
+          if missing:
+              raise SystemExit(
+                  "Missing scoring outputs: "
+                  + ", ".join(missing)
+              )
+
+          with (folder / "all_runner_scores.csv").open(
+              newline="", encoding="utf-8"
+          ) as f:
+              runners = list(csv.DictReader(f))
+
+          with (folder / "race_rankings.csv").open(
+              newline="", encoding="utf-8"
+          ) as f:
+              rankings = list(csv.DictReader(f))
+
+          print("Runners scored:", len(runners))
+          print("Eligible race rankings:", len(rankings))
+
+          if not runners:
+              raise SystemExit(
+                  "FAIL: No runner scores were produced."
+              )
+
+          if not rankings:
+              print(
+                  "WARNING: No eligible race rankings. "
+                  "Review exclusions, evidence coverage "
+                  "and score gaps."
+              )
+          else:
+              print("Scoring output check passed.")
+          PY
+
+      - name: Upload diagnostic and scoring reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: prize-money-live-probe
-          path: data/
+          name: strategy41-prize-money-scoring-test
+          path: |
+            data/
+            reports/
           retention-days: 7
           if-no-files-found: warn
