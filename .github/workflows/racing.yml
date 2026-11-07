@@ -1,4 +1,6 @@
+
 name: Australian Racing Strategy 4.1 - Top Ten
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,25 +9,29 @@ on:
         required: false
         type: string
   schedule:
-    # UK 21:30 is UTC 20:30 in BST and UTC 21:30 in GMT.
-    # Scheduled jobs can start late; accept the 21:00-21:59 UK hour.
     - cron: '30 20,21 * * *'
+
 permissions:
   contents: read
+
 concurrency:
   group: australian-racing-strategy41
   cancel-in-progress: false
+
 jobs:
   racing:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Choose racing date and UK scheduled run
         id: dates
         shell: bash
@@ -41,7 +47,9 @@ jobs:
               exit 0
             fi
           fi
+
           echo 'run_report=true' >> "$GITHUB_OUTPUT"
+
           if [[ -n "$MANUAL_DATE" ]]; then
             if [[ ! "$MANUAL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || \
                [[ "$(date -d "$MANUAL_DATE" +%F 2>/dev/null)" != "$MANUAL_DATE" ]]; then
@@ -52,20 +60,26 @@ jobs:
           else
             race_date="$(TZ=Australia/Sydney date +%F)"
           fi
+
           echo "race_date=$race_date" >> "$GITHUB_OUTPUT"
           echo "Racing date: $race_date"
+
       - name: Install collector dependencies
         if: steps.dates.outputs.run_report == 'true'
         run: python -m pip install -r requirements.txt
+
       - name: Check Python scripts
         if: steps.dates.outputs.run_report == 'true'
         run: python -m py_compile collect_racing.py collect_runners.py score_racing.py send_telegram.py
+
       - name: Collect Australian race programme
         if: steps.dates.outputs.run_report == 'true'
         run: python collect_racing.py --date '${{ steps.dates.outputs.race_date }}' --output data
+
       - name: Collect runners and historical starts
         if: steps.dates.outputs.run_report == 'true'
         run: python collect_runners.py --date '${{ steps.dates.outputs.race_date }}' --output data
+
       - name: Validate collection completeness
         if: steps.dates.outputs.run_report == 'true'
         env:
@@ -73,34 +87,82 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import csv, json, os
+          import csv
+          import json
+          import os
           from pathlib import Path
+
           folder = Path('data') / os.environ['RACE_DATE']
           programme = json.loads((folder / 'manifest.json').read_text())
           runners = json.loads((folder / 'runners_manifest.json').read_text())
+
           requested = int(programme.get('race_link_count', 0))
+          collected = int(runners.get('races_collected', 0))
+          excluded = int(runners.get('races_excluded', 0))
+          eligible = int(runners.get('races_eligible', 0))
+
           if requested <= 0:
-              raise SystemExit('No races collected; Telegram send blocked')
+              raise SystemExit('No race links collected; Telegram blocked')
+
           if programme.get('unknown'):
-              raise SystemExit('Unparsed meeting rows; coverage cannot be trusted')
-          if runners.get('errors') or runners.get('races_collected') != requested:
-              raise SystemExit('Incomplete runner collection; Telegram send blocked')
+              raise SystemExit('Unparsed meetings; Telegram blocked')
+
+          if runners.get('errors'):
+              raise SystemExit('Runner collection errors; Telegram blocked')
+
+          if collected != requested:
+              raise SystemExit(
+                  f'Collection incomplete: {collected} of {requested}'
+              )
+
+          if eligible + excluded != collected:
+              raise SystemExit(
+                  f'Race accounting mismatch: '
+                  f'{eligible} eligible + {excluded} excluded '
+                  f'!= {collected} collected'
+              )
+
+          if eligible <= 0:
+              raise SystemExit('No eligible races; Telegram blocked')
+
+          excluded_details = runners.get('excluded_races', [])
+          if len(excluded_details) != excluded:
+              raise SystemExit('Excluded race details do not match count')
+
           for filename in ('races.csv', 'runners.csv', 'past_starts.csv'):
               path = folder / filename
               if not path.is_file() or path.stat().st_size == 0:
                   raise SystemExit(f'Missing or empty {path}')
-          with (folder / 'runners.csv').open(newline='', encoding='utf-8') as f:
-              actual_races = {(r['date'], r['state'], r['meeting'], r['race']) for r in csv.DictReader(f)}
-          if len(actual_races) != requested:
-              raise SystemExit(f'Race coverage mismatch: {len(actual_races)} of {requested}')
-          print(f'Validated {requested} collected races; scratchings remain unverified')
+
+          with (folder / 'runners.csv').open(
+              newline='', encoding='utf-8'
+          ) as handle:
+              actual_races = {
+                  (r['date'], r['state'], r['meeting'], r['race'])
+                  for r in csv.DictReader(handle)
+              }
+
+          if len(actual_races) != eligible:
+              raise SystemExit(
+                  f'Eligible race coverage mismatch: '
+                  f'{len(actual_races)} of {eligible}'
+              )
+
+          print(
+              f'VALIDATED: {requested} collected, '
+              f'{excluded} excluded, {eligible} eligible. '
+              'Scratchings and odds remain unverified.'
+          )
           PY
+
       - name: Score Strategy 4.1 and rank top ten
         if: steps.dates.outputs.run_report == 'true'
         run: python score_racing.py --date '${{ steps.dates.outputs.race_date }}' --input data --output reports
+
       - name: Preview Telegram report
         if: steps.dates.outputs.run_report == 'true'
         run: python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --reports reports --dry-run
+
       - name: Upload diagnostics and reports
         if: always() && steps.dates.outputs.run_report == 'true'
         uses: actions/upload-artifact@v4
@@ -114,6 +176,7 @@ jobs:
             reports/${{ steps.dates.outputs.race_date }}/
           if-no-files-found: warn
           retention-days: 30
+
       - name: Send Strategy 4.1 top ten to Telegram
         if: steps.dates.outputs.run_report == 'true'
         env:
