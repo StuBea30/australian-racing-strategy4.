@@ -1,20 +1,18 @@
-
 name: Australian Racing Strategy 4.1 - Top Ten
 
 on:
   workflow_dispatch:
     inputs:
       race_date:
-        description: 'Australian racing date (YYYY-MM-DD); blank means current date in Sydney'
+        description: 'Australian racing date (YYYY-MM-DD); blank means today in Sydney'
         required: false
         type: string
-
   schedule:
-    # UK 21:30 = UTC 20:30 in BST and UTC 21:30 in GMT.
     - cron: '30 20,21 * * *'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: australian-racing-strategy41
@@ -24,7 +22,6 @@ jobs:
   racing:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -34,7 +31,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Choose racing date and UK scheduled run
+      - name: Select racing date and scheduled window
         id: dates
         shell: bash
         env:
@@ -42,189 +39,168 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [[ "$EVENT_NAME" == 'schedule' ]]; then
-            uk_clock="$(TZ=Europe/London date +%H:%M)"
-            if [[ "${uk_clock%%:*}" != '21' ]]; then
+            uk_hour="$(TZ=Europe/London date +%H)"
+            if [[ "$uk_hour" != '21' ]]; then
               echo 'run_report=false' >> "$GITHUB_OUTPUT"
-              echo "Skipped because UK clock is $uk_clock"
+              echo "Outside 21:00 UK hour; skipped (UK hour $uk_hour)"
               exit 0
             fi
           fi
-
-          echo 'run_report=true' >> "$GITHUB_OUTPUT"
-
           if [[ -n "$MANUAL_DATE" ]]; then
             if [[ ! "$MANUAL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || \
                [[ "$(date -d "$MANUAL_DATE" +%F 2>/dev/null)" != "$MANUAL_DATE" ]]; then
-              echo 'Invalid date: use YYYY-MM-DD' >&2
+              echo 'Invalid date: YYYY-MM-DD required' >&2
               exit 1
             fi
             race_date="$MANUAL_DATE"
           else
             race_date="$(TZ=Australia/Sydney date +%F)"
           fi
-
+          echo 'run_report=true' >> "$GITHUB_OUTPUT"
           echo "race_date=$race_date" >> "$GITHUB_OUTPUT"
           echo "Racing date: $race_date"
 
-      - name: Install collector dependencies
-        if: steps.dates.outputs.run_report == 'true'
-        run: python -m pip install -r requirements.txt
-
-      - name: Check Python scripts
-        if: steps.dates.outputs.run_report == 'true'
-        run: |
-          python -m py_compile \
-            collect_racing.py \
-            collect_runners.py \
-            score_racing.py \
-            send_telegram.py \
-            track_states.py \
-            prize_grading.py \
-            purse_data.py
-
-      - name: Validate purse thresholds
-        if: steps.dates.outputs.run_report == 'true'
-        shell: bash
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path('purse_thresholds.json')
-          if not path.is_file():
-              raise SystemExit('Missing purse_thresholds.json')
-
-          config = json.loads(path.read_text(encoding='utf-8'))
-          thresholds = config.get('standard_minima_aud')
-
-          if not isinstance(thresholds, list) or len(thresholds) != 6:
-              raise SystemExit('Exactly six purse thresholds required')
-
-          if any(
-              not isinstance(value, (int, float))
-              or isinstance(value, bool)
-              or value <= 0
-              for value in thresholds
-          ):
-              raise SystemExit('Purse thresholds must be positive numbers')
-
-          if thresholds != sorted(set(thresholds)):
-              raise SystemExit('Purse thresholds must be strictly increasing')
-
-          print('Verified purse thresholds:', thresholds)
-          PY
-
-      - name: Collect Australian race programme
-        if: steps.dates.outputs.run_report == 'true'
-        run: |
-          python collect_racing.py \
-            --date '${{ steps.dates.outputs.race_date }}' \
-            --output data
-
-      - name: Collect runners and historical starts
-        if: steps.dates.outputs.run_report == 'true'
-        run: |
-          python collect_runners.py \
-            --date '${{ steps.dates.outputs.race_date }}' \
-            --output data
-
-      - name: Validate collection completeness
+      - name: Check prior successful delivery
+        id: duplicate
         if: steps.dates.outputs.run_report == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RACE_DATE: ${{ steps.dates.outputs.race_date }}
         shell: bash
         run: |
           python - <<'PY'
-          import csv
-          import json
-          import os
-          from pathlib import Path
-
-          folder = Path('data') / os.environ['RACE_DATE']
-          programme = json.loads((folder / 'manifest.json').read_text())
-          runners = json.loads((folder / 'runners_manifest.json').read_text())
-
-          requested = int(programme.get('race_link_count', 0))
-          collected = int(runners.get('races_collected', 0))
-          excluded = int(runners.get('races_excluded', 0))
-          eligible = int(runners.get('races_eligible', 0))
-
-          if requested <= 0:
-              raise SystemExit('No race links collected; Telegram blocked')
-
-          if programme.get('unknown'):
-              raise SystemExit('Unparsed meetings; Telegram blocked')
-
-          if runners.get('errors'):
-              raise SystemExit('Runner collection errors; Telegram blocked')
-
-          if collected != requested:
-              raise SystemExit(
-                  f'Collection incomplete: {collected} of {requested}'
-              )
-
-          if eligible + excluded != collected:
-              raise SystemExit(
-                  f'Race accounting mismatch: '
-                  f'{eligible} eligible + {excluded} excluded '
-                  f'!= {collected} collected'
-              )
-
-          if eligible <= 0:
-              raise SystemExit('No eligible races; Telegram blocked')
-
-          excluded_details = runners.get('excluded_races', [])
-          if len(excluded_details) != excluded:
-              raise SystemExit('Excluded race details do not match count')
-
-          for filename in ('races.csv', 'runners.csv', 'past_starts.csv'):
-              path = folder / filename
-              if not path.is_file() or path.stat().st_size == 0:
-                  raise SystemExit(f'Missing or empty {path}')
-
-          with (folder / 'runners.csv').open(
-              newline='', encoding='utf-8'
-          ) as handle:
-              actual_races = {
-                  (r['date'], r['state'], r['meeting'], r['race'])
-                  for r in csv.DictReader(handle)
-              }
-
-          if len(actual_races) != eligible:
-              raise SystemExit(
-                  f'Eligible race coverage mismatch: '
-                  f'{len(actual_races)} of {eligible}'
-              )
-
-          print(
-              f'VALIDATED: {requested} collected, '
-              f'{excluded} excluded, {eligible} eligible. '
-              'Scratchings and odds remain unverified.'
-          )
+          import json, os, urllib.request
+          from urllib.parse import quote
+          name = 'strategy41-delivered-' + os.environ['RACE_DATE']
+          url = f"https://api.github.com/repos/{os.environ['GH_REPO']}/actions/artifacts?per_page=100&name={quote(name)}"
+          req = urllib.request.Request(url, headers={
+              'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': 'strategy41-workflow',
+          })
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              data = json.load(resp)
+          delivered = any(a['name'] == name and not a.get('expired') for a in data.get('artifacts', []))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('already_sent=' + ('true' if delivered else 'false') + '\n')
+          print('Already delivered:', delivered)
           PY
 
-      - name: Score Strategy 4.1 and rank top ten
-        if: steps.dates.outputs.run_report == 'true'
+      - name: Install dependencies
+        if: steps.dates.outputs.run_report == 'true' && steps.duplicate.outputs.already_sent != 'true'
+        run: python -m pip install -r requirements.txt
+
+      - name: Check Python and thresholds
+        if: steps.dates.outputs.run_report == 'true' && steps.duplicate.outputs.already_sent != 'true'
+        run: |
+          python -m py_compile collect_racing.py collect_runners.py score_racing.py send_telegram.py track_states.py prize_grading.py purse_data.py
+          python - <<'PY'
+          import json
+          values = json.load(open('purse_thresholds.json'))['standard_minima_aud']
+          assert values == [20000, 27000, 35000, 40000, 60000, 160000], 'Unexpected thresholds'
+          print('Six verified purse thresholds:', values)
+          PY
+
+      - name: Collect programme
+        id: programme
+        if: steps.dates.outputs.run_report == 'true' && steps.duplicate.outputs.already_sent != 'true'
+        env:
+          RACE_DATE: ${{ steps.dates.outputs.race_date }}
+        shell: bash
+        run: |
+          python collect_racing.py --date "$RACE_DATE" --output data && exit 0
+          python - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          path = Path('data') / os.environ['RACE_DATE'] / 'manifest.json'
+          if not path.is_file():
+              raise SystemExit('Programme failed without manifest')
+          m = json.loads(path.read_text())
+          if m.get('unknown') or int(m.get('race_link_count', -1)) != 0:
+              raise SystemExit('Programme failed or contained unparsed meetings')
+          print('No eligible programme links; will send no-eligible status')
+          PYCODE
+
+      - name: Detect empty programme
+        id: empty
+        if: steps.programme.outcome == 'success'
+        env:
+          RACE_DATE: ${{ steps.dates.outputs.race_date }}
+        run: |
+          python - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          m = json.loads((Path('data') / os.environ['RACE_DATE'] / 'manifest.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('empty=' + ('true' if int(m.get('race_link_count', 0)) == 0 else 'false') + '\n')
+          PYCODE
+
+      - name: Collect runners
+        if: steps.programme.outcome == 'success' && steps.empty.outputs.empty != 'true'
+        run: python collect_runners.py --date '${{ steps.dates.outputs.race_date }}' --output data
+
+      - name: Validate eligible races
+        id: validate
+        if: steps.programme.outcome == 'success' && steps.empty.outputs.empty != 'true'
+        env:
+          RACE_DATE: ${{ steps.dates.outputs.race_date }}
+        run: |
+          python - <<'PY'
+          import csv, json, os
+          from pathlib import Path
+          folder = Path('data') / os.environ['RACE_DATE']
+          p = json.loads((folder / 'manifest.json').read_text())
+          r = json.loads((folder / 'runners_manifest.json').read_text())
+          total = int(p.get('race_link_count', 0))
+          collected = int(r.get('races_collected', 0))
+          excluded = int(r.get('races_excluded', 0))
+          eligible = int(r.get('races_eligible', 0))
+          if p.get('unknown') or r.get('errors') or total <= 0:
+              raise SystemExit('Incomplete programme or runner collection')
+          if collected != total or excluded + eligible != total:
+              raise SystemExit(f'Race accounting mismatch: {collected}/{total}, excluded={excluded}, eligible={eligible}')
+          if len(r.get('excluded_races', [])) != excluded:
+              raise SystemExit('Excluded race detail mismatch')
+          if eligible:
+              for filename in ('races.csv', 'runners.csv', 'past_starts.csv'):
+                  if not (folder / filename).is_file():
+                      raise SystemExit(f'Missing {filename}')
+              with (folder / 'runners.csv').open(newline='', encoding='utf-8') as f:
+                  races = {(x['date'], x['state'], x['meeting'], x['race']) for x in csv.DictReader(f)}
+              if len(races) != eligible:
+                  raise SystemExit(f'Eligible race mismatch: {len(races)} of {eligible}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('eligible=' + str(eligible) + '\n')
+          print(f'Validated {total} racecards: {eligible} eligible, {excluded} excluded')
+          PY
+
+      - name: Mark no eligible races
+        id: no_races
+        if: steps.empty.outputs.empty == 'true'
+        run: echo 'eligible=0' >> "$GITHUB_OUTPUT"
+
+      - name: Score Strategy 4.1
+        if: steps.validate.outcome == 'success' && steps.validate.outputs.eligible != '0'
         run: |
           python score_racing.py \
             --date '${{ steps.dates.outputs.race_date }}' \
-            --input data \
-            --output reports \
+            --input data --output reports \
             --purse-thresholds purse_thresholds.json
 
-      - name: Preview Telegram report
-        if: steps.dates.outputs.run_report == 'true'
-        run: |
-          python send_telegram.py \
-            --date '${{ steps.dates.outputs.race_date }}' \
-            --reports reports \
-            --dry-run
+      - name: Preview selections
+        if: steps.validate.outcome == 'success' && steps.validate.outputs.eligible != '0'
+        run: python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --reports reports --dry-run
 
-      - name: Upload diagnostics and reports
-        if: always() && steps.dates.outputs.run_report == 'true'
+      - name: Preview no eligible races status
+        if: steps.no_races.outcome == 'success'
+        run: python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --status no-eligible-races --dry-run
+
+      - name: Upload diagnostics
+        if: always() && steps.dates.outputs.run_report == 'true' && steps.duplicate.outputs.already_sent != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: racing-strategy41-${{ steps.dates.outputs.race_date }}
+          name: racing-strategy41-${{ steps.dates.outputs.race_date }}-${{ github.run_id }}
           path: |
             data/${{ steps.dates.outputs.race_date }}/manifest.json
             data/${{ steps.dates.outputs.race_date }}/runners_manifest.json
@@ -234,12 +210,39 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Send Strategy 4.1 top ten to Telegram
-        if: steps.dates.outputs.run_report == 'true'
+      - name: Send selections or no-eligible status
+        id: send
+        if: steps.dates.outputs.run_report == 'true' && steps.duplicate.outputs.already_sent != 'true' && (steps.validate.outcome == 'success' || steps.no_races.outcome == 'success') && success()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RACE_DATE: ${{ steps.dates.outputs.race_date }}
+          ELIGIBLE: ${{ steps.no_races.outputs.eligible || steps.validate.outputs.eligible }}
         run: |
-          python send_telegram.py \
-            --date '${{ steps.dates.outputs.race_date }}' \
-            --reports reports
+          if [[ "$ELIGIBLE" == '0' ]]; then
+            python send_telegram.py --date "$RACE_DATE" --status no-eligible-races
+          else
+            python send_telegram.py --date "$RACE_DATE" --reports reports
+          fi
+
+      - name: Record successful Telegram delivery
+        if: steps.send.outcome == 'success'
+        run: |
+          mkdir -p delivery
+          printf 'Delivered %s\n' '${{ steps.dates.outputs.race_date }}' > delivery/receipt.txt
+
+      - name: Upload delivery receipt
+        if: steps.send.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: strategy41-delivered-${{ steps.dates.outputs.race_date }}
+          path: delivery/receipt.txt
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Alert on failed report
+        if: failure() && steps.dates.outputs.run_report == 'true' && steps.duplicate.outputs.already_sent != 'true' && steps.send.outcome != 'success'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python send_telegram.py --date '${{ steps.dates.outputs.race_date }}' --status failed
