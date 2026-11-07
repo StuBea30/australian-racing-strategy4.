@@ -862,44 +862,49 @@ def main():
 
         all_scores.extend(scored)
 
-        eligible = [
-            r for r in scored
-            if r["status"]
-            == "PROVISIONAL - SCRATCHINGS UNVERIFIED"
-        ]
-
         active = [
             r for r in scored
             if r["status"] != "SCRATCHED - EXCLUDED"
         ]
 
-        if len(eligible) != len(active):
+        if len(active) < 2:
             continue
 
-        if len(eligible) < 2:
-            continue
-
-        first, second = eligible[:2]
+        # Compare the actual top two active runners. Do not silently
+        # promote a lower-scoring horse past one with limited evidence.
+        first, second = active[:2]
         gap = round(first["score"] - second["score"], 2)
-
         first["gap_to_second"] = gap
 
         points, minimum_odds = staking_rule(gap)
-
         warnings = []
 
         if expected is None:
-            warnings.append(
-                "FIELD COUNT NOT INDEPENDENTLY VERIFIED"
-            )
+            warnings.append("FIELD COUNT NOT INDEPENDENTLY VERIFIED")
 
         if incomplete_field:
             warnings.append("INCOMPLETE FIELD")
-            points = 0
-            minimum_odds = None
+            points, minimum_odds = 0, None
 
-        if len(eligible) <= 3:
+        leaders_eligible = all(
+            r["status"] == "PROVISIONAL - SCRATCHINGS UNVERIFIED"
+            for r in (first, second)
+        )
+        if not leaders_eligible:
+            warnings.append("LEADING RUNNER(S) HAVE INSUFFICIENT DATA")
+            points, minimum_odds = 0, None
+
+        if len(active) <= 3:
             warnings.append("SMALL FIELD")
+
+        if incomplete_field:
+            ranking_status = "INCOMPLETE FIELD - NO BET"
+        elif not leaders_eligible:
+            ranking_status = "INSUFFICIENT LEADER EVIDENCE - NO BET"
+        elif points == 0:
+            ranking_status = "BELOW MINIMUM GAP - NO BET"
+        else:
+            ranking_status = "PROVISIONAL - SCRATCHINGS UNVERIFIED"
 
         race_rankings.append({
             "points": points,
@@ -915,11 +920,7 @@ def main():
             "second_score": second["score"],
             "gap": gap,
             "race_url": first["race_url"],
-            "status": (
-                "INCOMPLETE FIELD - NO BET"
-                if incomplete_field
-                else "PROVISIONAL - SCRATCHINGS UNVERIFIED"
-            ),
+            "status": ranking_status,
             "integrity_warnings": "; ".join(warnings),
             "collected_runners": len(group),
             "expected_runners": expected or "",
@@ -933,6 +934,10 @@ def main():
             int(number(r["race"]) or 0)
         )
     )
+
+    qualifying_rankings = [
+        race for race in race_rankings if race["points"] > 0
+    ]
 
     output = Path(args.output) / args.date
     output.mkdir(parents=True, exist_ok=True)
@@ -971,13 +976,13 @@ def main():
 
     write_csv(
         output / "top_ten_provisional.csv",
-        race_rankings[:10],
+        qualifying_rankings[:10],
         ranking_columns
     )
 
     write_csv(
         output / "top_three_provisional.csv",
-        race_rankings[:3],
+        qualifying_rankings[:3],
         ranking_columns
     )
 
@@ -988,7 +993,8 @@ def main():
         "races_with_runners": len(groups),
         "runners_scored": len(all_scores),
         "races_ranked": len(race_rankings),
-        "provisional_top_ten": len(race_rankings[:10]),
+        "provisional_top_ten": len(qualifying_rankings[:10]),
+        "qualifying_races": len(qualifying_rankings),
         "scratchings_verified": False,
         "betting_recommendations": False,
         "backtested": False,
@@ -1012,7 +1018,7 @@ def main():
         "|---:|---|---:|---|---:|---|---:|---:|---:|---:|",
     ]
 
-    for rank, race in enumerate(race_rankings[:10], 1):
+    for rank, race in enumerate(qualifying_rankings[:10], 1):
         lines.append(
             f"| {rank} | {race['meeting']} | "
             f"{race['race']} | {race['first_horse']} | "
@@ -1024,9 +1030,9 @@ def main():
             f"{race['minimum_win_odds'] or '-'} |"
         )
 
-    if not race_rankings:
+    if not qualifying_rankings:
         lines.append(
-            "No fully eligible race comparisons available."
+            "No qualifying selections with sufficient leader evidence."
         )
 
     lines.extend([
