@@ -133,13 +133,12 @@ def main():
     data=json.loads(Path(args.forecasts).read_text(encoding='utf-8'))
     now=datetime.now(timezone.utc)
     today=now.astimezone(ZoneInfo('Europe/London')).date()
-    tomorrow=today+timedelta(days=1)
     fixtures=[]
     for f in data['fixtures']:
         k=datetime.fromisoformat(f['kickoff_utc'].replace('Z','+00:00'))
         if k>now and k.astimezone(ZoneInfo('Europe/London')).date()==today:
             fixtures.append(f)
-    # Run only if fixtures today, to conserve credits.
+    # Only today's UK-local fixtures are eligible; no requests if there are none.
     league_codes=sorted({f['league'] for f in fixtures if f['league'] in SPORTS})
     errors=[]; quota=None; spent=0; events_by_league={}
     # Prioritize totals and BTTS. Additional markets only while safely inside credit cap.
@@ -181,7 +180,9 @@ def main():
         if len(top)==3: break
     lines=[f'⚽ FOOTBALL STRATEGY 3.0 — {today:%d %b %Y}',
            f'Top qualifying bets: {len(top)} | £5 each']
-    if top:
+    if not fixtures:
+        lines.extend(['', 'No fixtures scheduled today in the four tracked leagues.', 'No bookmaker odds requests needed.'])
+    elif top:
         for i,x in enumerate(top,1):
             when=datetime.fromisoformat(x['kickoff_utc']).astimezone(ZoneInfo('Europe/London'))
             label=x['market'].replace('_',' ').upper()
@@ -190,14 +191,19 @@ def main():
                           f"Odds {x['odds']:.2f} — {x['bookmaker']}",
                           f"Model {x['model_probability']:.1%}" + (f" | Edge +{x['edge']:.1%}" if x['edge'] is not None else f" | EV +{x['ev_per_unit']:.1%} per £1"),
                           f"Odds checked: {x['odds_updated']} | Stake £5"])
-    else: lines.extend(['','No qualifying bets found from the verified available markets.'])
+    elif errors or unmatched or not all_choices:
+        lines.extend(['', 'SCAN INCOMPLETE — no verified qualifying bets.', 'Some fixtures or markets could not be fully checked; this is not a confirmed no-bet day.'])
+    else:
+        lines.extend(['', 'No qualifying bets found in the markets successfully checked.'])
     lines.extend(['',f'Fixtures scanned: {len(fixtures)} | Matched: {len(fixtures)-len(unmatched)}',
                   f'Quoted candidates (>=1.80, 2 bookmakers): {len(all_choices)}',
                   f'Odds requests: {spent} | Monthly credits remaining: {quota if quota is not None else "unknown"}'])
     if unmatched: lines.append(f'Unmatched fixtures: {len(unmatched)}')
     if errors: lines.append('Coverage/API warnings: '+ '; '.join(errors[:3]))
+    if fixtures and spent == 0: lines.append('WARNING: No bookmaker odds requests were made.')
     lines.append('Selections are suggestions, not placed bets. Odds can change.')
-    report={'date_uk':str(today),'generated_utc':now.isoformat(),'fixtures_scanned':len(fixtures),
+    status=('no_fixtures_today' if not fixtures else 'incomplete' if errors or unmatched or not all_choices else 'checked')
+    report={'status':status,'date_uk':str(today),'generated_utc':now.isoformat(),'fixtures_scanned':len(fixtures),
             'unmatched':unmatched,'errors':errors,'odds_requests':spent,'credits_remaining':quota,
             'top_three':top,'qualifying_count':len(eligible),'candidates':all_choices}
     Path(args.output).write_text(json.dumps(report,indent=2,allow_nan=False),encoding='utf-8')
