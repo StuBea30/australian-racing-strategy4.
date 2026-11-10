@@ -1,0 +1,37 @@
+
+name: Football Strategy 3.0 - Historical Backtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: python -m pip install requests numpy scipy
+
+      - name: Backtest (no bets)
+        env:
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python football_backtest_v3.py --model-module football_model --seasons 2024 2025 2026 --holdout-start 2026-08-01
+
+      - name: Upload validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: football-backtest-v3
+          path: |
+            football_backtest_results.json
+            football_backtest_predictions.csv
+          if-no-files-found: warn
