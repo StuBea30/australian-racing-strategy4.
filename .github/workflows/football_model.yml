@@ -1,0 +1,29 @@
+name: Football Strategy 3.0 - Probability Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install requests numpy scipy
+      - name: Calculate football probabilities
+        env:
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python football_model.py --days 14
+      - name: Upload forecasts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: football-probabilities
+          path: football_probabilities.json
+          if-no-files-found: warn
