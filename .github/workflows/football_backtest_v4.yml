@@ -1,0 +1,32 @@
+name: Football Strategy 3.0 - Model Validation v4
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install requests numpy scipy
+      - name: Run independent model validation (no bets)
+        env:
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python football_backtest_v4.py --model football_model.py
+      - name: Upload model validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: football-model-validation-v4
+          path: |
+            football_v4_results.json
+            football_v4_holdout.csv
+          if-no-files-found: warn
