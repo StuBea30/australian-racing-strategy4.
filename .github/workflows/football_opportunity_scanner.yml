@@ -1,0 +1,58 @@
+name: Football Strategy 3.0 - Telegram Top Three
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 08:30 UK time: 08:30 UTC in winter, 07:30 UTC in summer.
+    - cron: '30 7,8 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  football-top-three:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install requests numpy scipy
+      - name: Skip the duplicate scheduled UTC hour
+        id: timecheck
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          local=datetime.now(ZoneInfo('Europe/London'))
+          allowed=os.environ['EVENT_NAME']=='workflow_dispatch' or local.hour==8
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write(f'run={str(allowed).lower()}\n')
+          print(f'UK local time: {local}; execute: {allowed}')
+          PY
+      - name: Generate fresh football probabilities
+        if: steps.timecheck.outputs.run == 'true'
+        env:
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python football_model.py --days 2
+      - name: Find qualifying bets and send Telegram
+        if: steps.timecheck.outputs.run == 'true'
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python football_opportunity_scanner.py --send --max-credits 12
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: football-opportunity-audit
+          path: |
+            football_probabilities.json
+            football_opportunities.json
+          if-no-files-found: ignore
