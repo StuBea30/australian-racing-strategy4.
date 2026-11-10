@@ -1,0 +1,106 @@
+
+name: Football Strategy 3.0 - Historical Data Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  history-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Check historical seasons
+        env:
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import time
+          import requests
+
+          leagues = {
+              "BL1": "Bundesliga",
+              "DED": "Eredivisie",
+              "ELC": "Championship",
+              "SA": "Serie A"
+          }
+          seasons = [2024, 2025, 2026]
+          token = os.environ["FOOTBALL_DATA_API_KEY"]
+          results = []
+
+          for code, league in leagues.items():
+              for season in seasons:
+                  url = (
+                      "https://api.football-data.org/v4/"
+                      f"competitions/{code}/matches"
+                  )
+                  try:
+                      response = requests.get(
+                          url,
+                          headers={"X-Auth-Token": token},
+                          params={"season": season},
+                          timeout=30
+                      )
+                      if response.status_code == 200:
+                          matches = response.json().get("matches", [])
+                          finished = [
+                              m for m in matches
+                              if m.get("status") == "FINISHED"
+                              and (m.get("score") or {})
+                                  .get("fullTime", {})
+                                  .get("home") is not None
+                          ]
+                          status = "AVAILABLE"
+                          count = len(finished)
+                      else:
+                          status = f"HTTP {response.status_code}"
+                          count = 0
+
+                      item = {
+                          "league": league,
+                          "code": code,
+                          "season": f"{season}/{str(season+1)[-2:]}",
+                          "status": status,
+                          "finished_matches": count
+                      }
+                      results.append(item)
+                      print(
+                          f"{league} {item['season']}: "
+                          f"{status}, {count} results",
+                          flush=True
+                      )
+                  except requests.RequestException as exc:
+                      results.append({
+                          "league": league,
+                          "code": code,
+                          "season": season,
+                          "status": "REQUEST_ERROR",
+                          "error": str(exc)
+                      })
+                      print(f"{league} {season}: ERROR {exc}")
+                  time.sleep(7)
+
+          with open("football_history_access.json", "w") as f:
+              json.dump(results, f, indent=2)
+
+          print("\nHistorical access check complete.")
+          PY
+
+      - name: Upload access report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: football-history-access
+          path: football_history_access.json
+          if-no-files-found: warn
