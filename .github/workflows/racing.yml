@@ -39,12 +39,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [[ "$EVENT_NAME" == 'schedule' ]]; then
-            uk_hour="$(TZ=Europe/London date +%H)"
-            if [[ "$uk_hour" != '21' ]]; then
-              echo 'run_report=false' >> "$GITHUB_OUTPUT"
-              echo "Outside 21:00 UK hour; skipped (UK hour $uk_hour)"
-              exit 0
-            fi
+            # Scheduled GitHub Actions may be delayed by hours. Never skip
+            # based on the runner's actual start time. The delivery-receipt
+            # check below prevents a second successful Telegram delivery.
+            echo "Scheduled trigger accepted regardless of runner start hour"
           fi
           if [[ -n "$MANUAL_DATE" ]]; then
             if [[ ! "$MANUAL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || \
