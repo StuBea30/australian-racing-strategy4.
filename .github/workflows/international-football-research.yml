@@ -15,6 +15,8 @@ jobs:
         run: python international_football/prepare_data.py
       - name: Walk-forward backtest
         run: OPENBLAS_NUM_THREADS=1 python international_football/model.py --matches international_football/data/competitive_matches.csv
+      - name: Over and Under 2.5 threshold calibration
+        run: python international_football/under25_thresholds.py --predictions international_football_results/predictions.csv
       - name: Last 12 months model win percentages
         run: python international_football/last12_report.py --predictions international_football_results/predictions.csv --end 2026-11-14
       - uses: actions/upload-artifact@v4
