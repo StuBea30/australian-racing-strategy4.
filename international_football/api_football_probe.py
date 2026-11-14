@@ -43,16 +43,18 @@ if key:
                        "paging":body.get("paging")}
                 rows=body.get("response",[])
                 if endpoint=="/odds/bets":
-                    check["markets_matching"]=[{"id":x.get("id"),"name":x.get("name")} for x in rows if any(n in x.get("name","").lower() for n in ("both teams","goals over","over/under"))][:20]
+                    check["markets_matching"]=[{"id":x.get("id"),"name":x.get("name")} for x in rows if any(n in (x.get("name") or "").lower() for n in ("both teams","goals over","over/under"))][:20]
                 else:
                     check["sample"]=[]
                     for x in rows[:10]:
-                        names=[{"bookmaker":b.get("name"),"markets":[z.get("name") for z in b.get("bets",[]) if any(n in z.get("name","").lower() for n in ("both teams","goals over","over/under"))]} for b in x.get("bookmakers",[])]
+                        names=[{"bookmaker":b.get("name"),"markets":[z.get("name") for z in b.get("bets",[]) if any(n in (z.get("name") or "").lower() for n in ("both teams","goals over","over/under"))]} for b in x.get("bookmakers",[])]
                         check["sample"].append({"fixture_id":x.get("fixture",{}).get("id"),"league":x.get("league",{}).get("name"),"bookmakers":names[:5]})
                 report["checks"].append(check)
-                if r.status_code!=200 or body.get("errors"):break
+                if r.status_code!=200 or body.get("errors"):
+                    print(f"{endpoint}: HTTP {r.status_code}, errors={body.get('errors')}")
             except Exception as exc:
-                report["checks"].append({"endpoint":endpoint,"error":str(exc)});break
-    report["conclusion"]="credentials_and_fixture_feed_checked" if len(report["checks"])==2 and all(x.get("http_status")==200 and not x.get("api_errors") for x in report["checks"]) else "api_access_issue"
+                report["checks"].append({"endpoint":endpoint,"error":str(exc)})
+    odds_checks=[c for c in report["checks"] if c.get("endpoint") in ("/odds","/odds/bets")]
+    report["conclusion"]="odds_checked" if odds_checks and all(c.get("http_status")==200 and not c.get("api_errors") for c in odds_checks) else "odds_limited_or_unavailable"
 print(json.dumps(report,indent=2,default=str))
 open("international_football_api_probe.json","w").write(json.dumps(report,indent=2,default=str))
