@@ -68,6 +68,7 @@ def main():
             # The Odds API may reject combined market requests for some sports.
             # Try each market independently, preserving per-market errors and coverage.
             raw_events={}
+            unsupported_markets=[]
             for mk in ("totals","btts"):
                 if report["requests"]>=10:
                     report["warnings"].append("10-request budget reached; coverage incomplete")
@@ -76,6 +77,15 @@ def main():
                     "apiKey":key,"regions":"uk","markets":mk,"oddsFormat":"decimal"},timeout=30)
                 report["requests"]+=1
                 if not response.ok:
+                    try:
+                        error_code=response.json().get("error_code")
+                    except (ValueError,TypeError):
+                        error_code=None
+                    if response.status_code==422 and error_code=="INVALID_MARKET":
+                        unsupported_markets.append(mk)
+                        report.setdefault("unsupported_markets",[]).append(f"{sport}: {mk}")
+                        print(f"{sport}: {mk} unavailable through odds provider; other market remains eligible")
+                        continue
                     report["warnings"].append(f"{sport} {mk}: HTTP {response.status_code} — {response.text[:220]}")
                     incomplete=True;continue
                 for item in response.json():
@@ -86,6 +96,8 @@ def main():
                             existing["markets"].extend(book.get("markets",[]))
                         else:
                             target["bookmakers"].append({**book,"markets":list(book.get("markets",[]))})
+            if not raw_events and not unsupported_markets:
+                incomplete=True
             for e in raw_events.values():
                 kick=datetime.fromisoformat(e["commence_time"].replace("Z","+00:00"))
                 if not (kick>now and kick.astimezone(ZoneInfo("Europe/London")).date()==today):continue
