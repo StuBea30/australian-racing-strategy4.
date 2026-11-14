@@ -28,8 +28,6 @@ def markets(event):
             for o in market.get("outcomes",[]):
                 if key=="totals" and o.get("name","").lower()=="over" and o.get("point")==2.5: name="over25"
                 elif key=="totals" and o.get("name","").lower()=="under" and o.get("point")==2.5: name="under25"
-                elif key=="totals" and o.get("name","").lower()=="over" and o.get("point")==1.5: name="over15"
-                elif key=="btts" and o.get("name","").lower()=="yes": name="btts"
                 else: continue
                 try: odds=float(o["price"])
                 except (ValueError,TypeError,KeyError): continue
@@ -70,7 +68,7 @@ def main():
             # Try each market independently, preserving per-market errors and coverage.
             raw_events={}
             unsupported_markets=[]
-            for mk in ("totals","btts"):
+            for mk in ("totals",):
                 if report["requests"]>=10:
                     report["warnings"].append("10-request budget reached; coverage incomplete")
                     incomplete=True;break
@@ -116,12 +114,11 @@ def main():
                     fixture["status"]="model_unavailable"
                     incomplete=True;continue
                 available=markets(e)
-                # Extra totals lines are research-only until independently backtested.
-                for market in ("over25","under25","over15","btts"):
+                # Both 2.5 goal sides are evaluated; Under remains research-only pending odds-based validation.
+                for market in ("over25","under25"):
                     offers=available.get(market,[])
                     unique={b[0] for b in offers}
-                    p_model=(1-probs["over25"]) if market=="under25" else (
-                        probs.get("over15") if market=="over15" else probs[market])
+                    p_model=(1-probs["over25"]) if market=="under25" else probs["over25"]
                     if p_model is None:
                         # P(Over 1.5) requires the total-goals Poisson CDF, not
                         # a transformation of P(Over 2.5). Never invent it.
@@ -133,7 +130,7 @@ def main():
                             "bookmaker_count":len(unique)}
                     fixture["markets"][market]=detail
                     if not offers:
-                        detail["status"]="provider_unsupported" if (market=="btts" and "btts" in unsupported_markets) else "no_prices"
+                        detail["status"]="no_prices"
                         continue
                     best=max(offers,key=lambda x:x[2])
                     odds=best[2];p=p_model;edge=p-1/odds
@@ -142,7 +139,7 @@ def main():
                     if len(unique)<2: detail["status"]="fewer_than_two_bookmakers"
                     elif odds<1.8: detail["status"]="odds_below_1_80"
                     elif edge<0.05: detail["status"]="edge_below_5pp"
-                    elif market in ("under25","over15"):
+                    elif market=="under25":
                         detail["status"]="research_candidate_not_validated"
                     else:
                         detail["status"]="qualifies"
