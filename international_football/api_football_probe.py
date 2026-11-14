@@ -69,13 +69,16 @@ if key:
             name=league.get("name") or ""
             typ=league.get("type")
             if typ=="Cup" and any(q.lower() in name.lower() for q in names):
-                matches.append({"id":league.get("id"),"name":name,"type":typ})
+                matches.append({"id":league.get("id"),"name":name,"type":typ,"season":next((p.get("year") for p in x.get("seasons",[]) if p.get("current")),None)})
         report["checks"].append({"endpoint":"/leagues","http_status":res.status_code,
                "api_errors":payload.get("errors"),"matched_competitions":matches[:20]})
         # International competitions may be between seasons; only inspect active feeds.
-        for league in matches[:2]:
+        # Prefer senior men's qualifying competitions, and exclude women's, youth and club tournaments.
+        eligible=[m for m in matches if m["season"] is not None and not any(t in m["name"].lower() for t in ("women","femenina","u17","u18","u19","u20","u21","u23","club","qualification - women"))]
+        preferred=sorted(eligible,key=lambda m:(0 if "world cup - qualification" in m["name"].lower() else 1,m["name"]))
+        for league in preferred[:3]:
             r=requests.get(BASE+"/odds",headers=headers,
-                 params={"league":league["id"],"date":today,"page":1},timeout=25)
+                 params={"league":league["id"],"season":league["season"],"date":today,"page":1},timeout=25)
             body=r.json()
             rows=body.get("response") or []
             examples=[]
