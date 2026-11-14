@@ -35,9 +35,12 @@ def markets(event):
                 found.setdefault(name,[]).append((b.get("key") or b.get("title"),b.get("title",""),odds))
     return found
 def main():
-    now=datetime.now(timezone.utc);today=now.astimezone(ZoneInfo("Europe/London")).date()
+    now=datetime.now(timezone.utc)
+    from datetime import date
+    today=date.fromisoformat(os.environ["REPORT_DATE"]) if os.getenv("REPORT_DATE") else now.astimezone(ZoneInfo("Europe/London")).date()
+    preview=bool(os.getenv("REPORT_DATE"))
     report={"scope":"European senior mens national teams - UEFA Nations League and European World Cup qualifying", "date_uk":str(today),"generated_utc":now.isoformat(),"status":"incomplete",
-            "qualifying":[],"warnings":[],"events_checked":0,"requests":0}
+            "qualifying":[],"warnings":[],"events_checked":0,"requests":0,"preview":preview}
     def save():
         Path("international_football_live.json").write_text(json.dumps(report,indent=2))
     key=os.getenv("ODDS_API_KEY")
@@ -132,7 +135,7 @@ def main():
     print(json.dumps(report,indent=2))
     # Send only genuine, fully checked qualifying selections; don't send an
     # unverified no-bet claim. A partial scan can still show verified bets.
-    if report["qualifying"] and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
+    if not preview and report["qualifying"] and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
         lines=[f"🇪🇺 EUROPEAN INTERNATIONAL FOOTBALL 1.0 — {today:%d %b %Y}",
                "Separate from domestic challenge | suggestions only"]
         for i,c in enumerate(report["qualifying"],1):
