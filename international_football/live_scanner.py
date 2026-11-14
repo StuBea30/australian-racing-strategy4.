@@ -114,18 +114,17 @@ def main():
                     fixture["status"]="model_unavailable"
                     incomplete=True;continue
                 available=markets(e)
-                # Strategy 1.1: Under 2.5 uses a conservative provisional calibration.\n                # 0.85 multiplier is a research haircut informed by historical overconfidence,\n                # NOT a fitted/validated calibration curve or proven betting advantage.
+                # Strategy 1.1: Under 2.5 uses a conservative provisional calibration.
+                # 0.85 multiplier is a research haircut informed by historical overconfidence,
+                # NOT a fitted/validated calibration curve or proven betting advantage.
                 for market in ("over25","under25"):
                     offers=available.get(market,[])
                     unique={b[0] for b in offers}
-                    raw_p=(1-probs["over25"]) if market=="under25" else probs["over25"]\n                    p_model=0.85*raw_p if market=="under25" else raw_p
-                    if p_model is None:
-                        # P(Over 1.5) requires the total-goals Poisson CDF, not
-                        # a transformation of P(Over 2.5). Never invent it.
-                        fixture["markets"][market]={"status":"model_not_implemented",
-                            "bookmakers":[{"name":name,"odds":odds} for _,name,odds in sorted(offers,key=lambda x:-x[2])]}
-                        continue
-                    detail={"model_probability":round(p_model,4),\n                            "raw_model_probability":round(raw_p,4),\n                            "calibration":"provisional_under25_x0.85_not_validated" if market=="under25" else "none",
+                    raw_p=(1-probs["over25"]) if market=="under25" else probs["over25"]
+                    p_model=0.85*raw_p if market=="under25" else raw_p
+                    detail={"model_probability":round(p_model,4),
+                            "raw_model_probability":round(raw_p,4),
+                            "calibration":"provisional_under25_x0.85_not_validated" if market=="under25" else "none",
                             "bookmakers":[{"name":name,"odds":odds} for _,name,odds in sorted(offers,key=lambda x:-x[2])],
                             "bookmaker_count":len(unique)}
                     fixture["markets"][market]=detail
@@ -136,11 +135,11 @@ def main():
                     odds=best[2];p=p_model;edge=p-1/odds
                     detail.update({"best_odds":odds,"best_bookmaker":best[1],
                                    "edge":round(edge,4),"ev":round(p*odds-1,4)})
+                    min_odds=2.0 if market=="under25" else 1.8
+                    min_edge=0.08 if market=="under25" else 0.05
                     if len(unique)<2: detail["status"]="fewer_than_two_bookmakers"
-                    elif odds<1.8: detail["status"]="odds_below_1_80"
-                    elif edge<0.05: detail["status"]="edge_below_5pp"
-                    elif market=="under25":
-                        detail["status"]="research_candidate_not_validated"
+                    elif odds<min_odds: detail["status"]=f"odds_below_{min_odds:.2f}"
+                    elif edge<min_edge: detail["status"]=f"edge_below_{min_edge:.0%}"
                     else:
                         detail["status"]="qualifies"
                         candidates.append({"competition":sport,"home":e["home_team"],"away":e["away_team"],
@@ -154,7 +153,8 @@ def main():
             if fixture in seen:continue
             selected.append(c);seen.add(fixture)
             if len(selected)==3:break
-        report["qualifying"]=selected\n        report["strategy"]="1.1: over25 odds>=1.80 edge>=5pp; under25 odds>=2.00 edge>=8pp with provisional 0.85 probability haircut; two bookmakers; max 3 combined"
+        report["qualifying"]=selected
+        report["strategy"]="1.1: over25 odds>=1.80 edge>=5pp; under25 odds>=2.00 edge>=8pp with provisional 0.85 probability haircut; two bookmakers; max 3 combined"
         report["status"]="incomplete" if incomplete else "checked"
     except Exception as e:
         report["warnings"].append(f"Scan failed: {type(e).__name__}: {e}")
@@ -164,14 +164,16 @@ def main():
     # unverified no-bet claim. A partial scan can still show verified bets.
     if not preview and report["qualifying"] and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
         lines=[f"🇪🇺 EUROPEAN INTERNATIONAL FOOTBALL 1.0 — {today:%d %b %Y}",
-               "Separate from domestic challenge | suggestions only",\n               "Over 2.5: >=1.80, >=5pp edge | Under 2.5: >=2.00, >=8pp edge (provisional calibrated estimate)"]
+               "Separate from domestic challenge | suggestions only",
+               "Over 2.5: >=1.80, >=5pp edge | Under 2.5: >=2.00, >=8pp edge (provisional calibrated estimate)"]
         for i,c in enumerate(report["qualifying"],1):
             lines.extend(["",f"{i}. {c['home']} v {c['away']}",
                           f"{c['market'].upper()} | {c['odds']:.2f} ({c['bookmaker']})",
                           f"Model {c['model_probability']:.1%} | Edge +{c['edge']:.1%} | £5"])
         if report["status"]=="incomplete":lines.append("WARNING: other fixtures not fully checked")
         resp=requests.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-            json={"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":"\n".join(lines)},timeout=30)
+            json={"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":"
+".join(lines)},timeout=30)
         resp.raise_for_status()
     elif report["status"]=="incomplete":
         print("No Telegram: scan incomplete")
