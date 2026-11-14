@@ -1,4 +1,4 @@
-"""International Strategy 1.0 live *suggestions*, separate from domestic model."""
+"""International Strategy 1.1 live *suggestions*, separate from domestic model."""
 import json,os,sys
 from datetime import datetime,timezone
 from pathlib import Path
@@ -163,7 +163,7 @@ def main():
     # Send only genuine, fully checked qualifying selections; don't send an
     # unverified no-bet claim. A partial scan can still show verified bets.
     if not preview and report["qualifying"] and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
-        lines=[f"🇪🇺 EUROPEAN INTERNATIONAL FOOTBALL 1.0 — {today:%d %b %Y}",
+        lines=[f"🇪🇺 EUROPEAN INTERNATIONAL FOOTBALL 1.1 — {today:%d %b %Y}",
                "Separate from domestic challenge | suggestions only",
                "Over 2.5: >=1.80, >=5pp edge | Under 2.5: >=2.00, >=8pp edge (provisional calibrated estimate)"]
         for i,c in enumerate(report["qualifying"],1):
