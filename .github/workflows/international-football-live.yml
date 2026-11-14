@@ -1,4 +1,4 @@
-name: International Football 1.0 - Live Opportunities
+name: International Football 1.1 - Live Opportunities
 on:
   workflow_dispatch:
     inputs:
