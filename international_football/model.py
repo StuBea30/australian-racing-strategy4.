@@ -60,7 +60,8 @@ def predict(model,home,away,neutral):
     h=ix[home];a=ix[away]
     lam=np.exp(base+att[h]-defence[a]+(0 if neutral else adv))
     mu=np.exp(base+att[a]-defence[h])
-    return {"over25":float(1-poisson.cdf(2,lam+mu)),
+    return {"over15":float(1-poisson.cdf(1,lam+mu)),
+            "over25":float(1-poisson.cdf(2,lam+mu)),
             "btts":float((1-np.exp(-lam))*(1-np.exp(-mu)))}
 def backtest(d,first_year=2023):
     rows=[]
