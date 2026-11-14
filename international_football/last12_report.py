@@ -12,7 +12,7 @@ def main():
     d=d[(d.date>=start)&(d.date<end)]
     print(f"LAST 12 MONTHS: {start.date()} to {(end-pd.Timedelta(days=1)).date()}")
     print(f"Matches with model predictions: {len(d)}")
-    for m in ("over25","btts"):
+    for m in ("over25","under25"):
         p=d[f"{m}_p"];result=d[f"{m}_result"]
         print(f"{m}: all outcomes {int(result.sum())}/{len(result)} = {result.mean()*100:.2f}%" if len(d) else f"{m}: no matches")
         # Model-only candidate threshold: at minimum acceptable odds 1.80, 5pp edge
