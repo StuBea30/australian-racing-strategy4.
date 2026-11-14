@@ -114,18 +114,18 @@ def main():
                     fixture["status"]="model_unavailable"
                     incomplete=True;continue
                 available=markets(e)
-                # Both 2.5 goal sides are evaluated; Under remains research-only pending odds-based validation.
+                # Strategy 1.1: Under 2.5 uses a conservative provisional calibration.\n                # 0.85 multiplier is a research haircut informed by historical overconfidence,\n                # NOT a fitted/validated calibration curve or proven betting advantage.
                 for market in ("over25","under25"):
                     offers=available.get(market,[])
                     unique={b[0] for b in offers}
-                    p_model=(1-probs["over25"]) if market=="under25" else probs["over25"]
+                    raw_p=(1-probs["over25"]) if market=="under25" else probs["over25"]\n                    p_model=0.85*raw_p if market=="under25" else raw_p
                     if p_model is None:
                         # P(Over 1.5) requires the total-goals Poisson CDF, not
                         # a transformation of P(Over 2.5). Never invent it.
                         fixture["markets"][market]={"status":"model_not_implemented",
                             "bookmakers":[{"name":name,"odds":odds} for _,name,odds in sorted(offers,key=lambda x:-x[2])]}
                         continue
-                    detail={"model_probability":round(p_model,4),
+                    detail={"model_probability":round(p_model,4),\n                            "raw_model_probability":round(raw_p,4),\n                            "calibration":"provisional_under25_x0.85_not_validated" if market=="under25" else "none",
                             "bookmakers":[{"name":name,"odds":odds} for _,name,odds in sorted(offers,key=lambda x:-x[2])],
                             "bookmaker_count":len(unique)}
                     fixture["markets"][market]=detail
@@ -154,7 +154,7 @@ def main():
             if fixture in seen:continue
             selected.append(c);seen.add(fixture)
             if len(selected)==3:break
-        report["qualifying"]=selected
+        report["qualifying"]=selected\n        report["strategy"]="1.1: over25 odds>=1.80 edge>=5pp; under25 odds>=2.00 edge>=8pp with provisional 0.85 probability haircut; two bookmakers; max 3 combined"
         report["status"]="incomplete" if incomplete else "checked"
     except Exception as e:
         report["warnings"].append(f"Scan failed: {type(e).__name__}: {e}")
@@ -164,7 +164,7 @@ def main():
     # unverified no-bet claim. A partial scan can still show verified bets.
     if not preview and report["qualifying"] and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
         lines=[f"🇪🇺 EUROPEAN INTERNATIONAL FOOTBALL 1.0 — {today:%d %b %Y}",
-               "Separate from domestic challenge | suggestions only"]
+               "Separate from domestic challenge | suggestions only",\n               "Over 2.5: >=1.80, >=5pp edge | Under 2.5: >=2.00, >=8pp edge (provisional calibrated estimate)"]
         for i,c in enumerate(report["qualifying"],1):
             lines.extend(["",f"{i}. {c['home']} v {c['away']}",
                           f"{c['market'].upper()} | {c['odds']:.2f} ({c['bookmaker']})",
