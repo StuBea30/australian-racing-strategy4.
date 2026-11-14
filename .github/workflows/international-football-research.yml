@@ -1,0 +1,25 @@
+name: International football research backtest
+on:
+  workflow_dispatch:
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy scipy requests
+      - name: Download and filter competitive senior internationals
+        run: python international_football/prepare_data.py
+      - name: Walk-forward backtest
+        run: OPENBLAS_NUM_THREADS=1 python international_football/model.py --matches international_football/data/competitive_matches.csv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: international-football-research
+          path: |
+            international_football_results/
+            international_football/data/competitive_matches.csv
+          retention-days: 30
