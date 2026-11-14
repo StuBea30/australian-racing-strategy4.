@@ -1,0 +1,42 @@
+name: International Football 1.0 - Live Opportunities
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 7,8 * * *'
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests pandas numpy scipy
+      - name: Check UK local 08:30
+        id: timecheck
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          allowed=os.environ["EVENT_NAME"]=="workflow_dispatch" or datetime.now(ZoneInfo("Europe/London")).hour==8
+          with open(os.environ["GITHUB_OUTPUT"],"a") as f:f.write(f"run={str(allowed).lower()}\n")
+          PY
+      - name: Scan competitive internationals independently
+        if: steps.timecheck.outputs.run == 'true'
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python international_football/live_scanner.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: international-football-live-audit
+          path: international_football_live.json
+          if-no-files-found: ignore
