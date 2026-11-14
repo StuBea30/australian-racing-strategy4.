@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from scipy.stats import poisson
+from scipy.special import gammaln
 
 HALF_LIFE=365
 RIDGE=1.5
@@ -33,12 +34,24 @@ def fit(d,cutoff):
     w=np.exp(-np.log(2)*days/HALF_LIFE)
     def unpack(x):
         return x[:n]-x[:n].mean(),x[n:2*n]-x[n:2*n].mean(),x[-2],x[-1]
-    def loss(x):
+    # Analytic gradient avoids finite differences over hundreds of parameters.
+    def loss_grad(x):
         attack,defence,base,adv=unpack(x)
-        lam=np.exp(np.clip(base+attack[h]-defence[a]+adv*(~neutral),-3,3))
-        mu=np.exp(np.clip(base+attack[a]-defence[h],-3,3))
-        return -np.dot(w,poisson.logpmf(hg,lam)+poisson.logpmf(ag,mu))+RIDGE*np.sum(x[:2*n]**2)
-    result=minimize(loss,np.r_[np.zeros(2*n),np.log(1.2),0.15],method="L-BFGS-B")
+        elam=base+attack[h]-defence[a]+adv*(~neutral)
+        emu=base+attack[a]-defence[h]
+        lam=np.exp(elam);mu=np.exp(emu)
+        loss=-np.dot(w,hg*elam-lam-gammaln(hg+1)+ag*emu-mu-gammaln(ag+1))
+        loss+=RIDGE*np.sum(x[:2*n]**2)
+        eh=w*(lam-hg);ea=w*(mu-ag)
+        gatt=np.bincount(h,weights=eh,minlength=n)+np.bincount(a,weights=ea,minlength=n)
+        gdef=-np.bincount(a,weights=eh,minlength=n)-np.bincount(h,weights=ea,minlength=n)
+        gatt-=gatt.mean();gdef-=gdef.mean()
+        g=np.r_[gatt+2*RIDGE*x[:n],gdef+2*RIDGE*x[n:2*n],
+                 eh.sum()+ea.sum(),eh[~neutral].sum()]
+        return float(loss),g
+    result=minimize(loss_grad,np.r_[np.zeros(2*n),np.log(1.2),0.15],
+                    jac=True,method="L-BFGS-B",bounds=[(-2.5,2.5)]*(2*n)+[(-1.5,1.5),(-1.0,1.0)],
+                    options={"maxiter":1200,"maxfun":1500,"ftol":1e-9})
     if not result.success: raise RuntimeError(str(result.message))
     return ix,unpack(result.x)
 def predict(model,home,away,neutral):
