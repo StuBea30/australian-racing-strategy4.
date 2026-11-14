@@ -24,6 +24,35 @@ if key:
             if r.status_code!=200 or body.get("errors"):break
         except Exception as exc:
             report["checks"].append({"endpoint":endpoint,"error":str(exc)});break
+    # Examine pre-match betting catalogues and a small, bounded sample of future odds.
+    # Do not request additional pages: this is a cost-controlled diagnostic only.
+    if len(report["checks"])==2 and all(x.get("http_status")==200 and not x.get("api_errors") for x in report["checks"]):
+        from datetime import datetime,timedelta
+        from zoneinfo import ZoneInfo
+        local=datetime.now(ZoneInfo("Europe/London"))
+        for endpoint,params in [
+            ("/odds/bets",{}),
+            ("/odds",{"date":(local+timedelta(days=1)).strftime("%Y-%m-%d"),"page":1}),
+            ("/odds",{"date":(local+timedelta(days=2)).strftime("%Y-%m-%d"),"page":1})
+        ]:
+            try:
+                r=requests.get(BASE+endpoint,headers=headers,params=params,timeout=25)
+                body=r.json()
+                check={"endpoint":endpoint,"params":params,"http_status":r.status_code,
+                       "api_errors":body.get("errors"),"results":body.get("results"),
+                       "paging":body.get("paging")}
+                rows=body.get("response",[])
+                if endpoint=="/odds/bets":
+                    check["markets_matching"]=[{"id":x.get("id"),"name":x.get("name")} for x in rows if any(n in x.get("name","").lower() for n in ("both teams","goals over","over/under"))][:20]
+                else:
+                    check["sample"]=[]
+                    for x in rows[:10]:
+                        names=[{"bookmaker":b.get("name"),"markets":[z.get("name") for z in b.get("bets",[]) if any(n in z.get("name","").lower() for n in ("both teams","goals over","over/under"))]} for b in x.get("bookmakers",[])]
+                        check["sample"].append({"fixture_id":x.get("fixture",{}).get("id"),"league":x.get("league",{}).get("name"),"bookmakers":names[:5]})
+                report["checks"].append(check)
+                if r.status_code!=200 or body.get("errors"):break
+            except Exception as exc:
+                report["checks"].append({"endpoint":endpoint,"error":str(exc)});break
     report["conclusion"]="credentials_and_fixture_feed_checked" if len(report["checks"])==2 and all(x.get("http_status")==200 and not x.get("api_errors") for x in report["checks"]) else "api_access_issue"
 print(json.dumps(report,indent=2,default=str))
 open("international_football_api_probe.json","w").write(json.dumps(report,indent=2,default=str))
