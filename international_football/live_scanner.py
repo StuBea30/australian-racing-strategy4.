@@ -7,13 +7,9 @@ import requests
 from model import load,fit,predict
 from prepare_data import main as prepare
 API="https://api.the-odds-api.com/v4"
-# Only known competitive international competition keys; no friendlies or clubs.
-ALLOWED={"soccer_uefa_nations_league","soccer_fifa_world_cup_qualifiers_europe",
-         "soccer_fifa_world_cup_qualifiers_south_america","soccer_fifa_world_cup_qualifiers_asia",
-         "soccer_fifa_world_cup_qualifiers_africa","soccer_fifa_world_cup_qualifiers_north_central_america",
-         "soccer_uefa_european_championship","soccer_conmebol_copa_america",
-         "soccer_concacaf_gold_cup","soccer_concacaf_nations_league",
-         "soccer_afc_asian_cup","soccer_caf_africa_cup_of_nations","soccer_fifa_world_cup"}
+# European senior men's national teams only, in UEFA competitive fixtures.
+# Excludes friendlies, club football, other confederations and neutral-site finals.
+ALLOWED={"soccer_uefa_nations_league","soccer_fifa_world_cup_qualifiers_europe"}
 ALIASES={"usa":"United States","united states":"United States","south korea":"South Korea",
          "korea republic":"South Korea","ivory coast":"Ivory Coast",
          "cote d ivoire":"Ivory Coast","czechia":"Czech Republic",
@@ -40,7 +36,7 @@ def markets(event):
     return found
 def main():
     now=datetime.now(timezone.utc);today=now.astimezone(ZoneInfo("Europe/London")).date()
-    report={"date_uk":str(today),"generated_utc":now.isoformat(),"status":"incomplete",
+    report={"scope":"European senior mens national teams - UEFA Nations League and European World Cup qualifying", "date_uk":str(today),"generated_utc":now.isoformat(),"status":"incomplete",
             "qualifying":[],"warnings":[],"events_checked":0,"requests":0}
     def save():
         Path("international_football_live.json").write_text(json.dumps(report,indent=2))
@@ -108,12 +104,7 @@ def main():
                     incomplete=True;continue
                 # Venue neutrality is not reliably available in odds events. Skip
                 # tournaments with potentially neutral venues rather than guess.
-                if sport not in {"soccer_fifa_world_cup_qualifiers_europe",
-                                 "soccer_fifa_world_cup_qualifiers_south_america",
-                                 "soccer_fifa_world_cup_qualifiers_asia",
-                                 "soccer_fifa_world_cup_qualifiers_africa",
-                                 "soccer_fifa_world_cup_qualifiers_north_central_america",
-                                 "soccer_uefa_nations_league"}:
+                if sport not in ALLOWED:
                     report["warnings"].append(f"Neutral venue unverified: {sport}")
                     incomplete=True;continue
                 probs=predict(model,h,a,False)
@@ -142,7 +133,7 @@ def main():
     # Send only genuine, fully checked qualifying selections; don't send an
     # unverified no-bet claim. A partial scan can still show verified bets.
     if report["qualifying"] and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
-        lines=[f"🌍 INTERNATIONAL FOOTBALL 1.0 — {today:%d %b %Y}",
+        lines=[f"🇪🇺 EUROPEAN INTERNATIONAL FOOTBALL 1.0 — {today:%d %b %Y}",
                "Separate from domestic challenge | suggestions only"]
         for i,c in enumerate(report["qualifying"],1):
             lines.extend(["",f"{i}. {c['home']} v {c['away']}",
