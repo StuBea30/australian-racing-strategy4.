@@ -40,7 +40,7 @@ def main():
     today=date.fromisoformat(os.environ["REPORT_DATE"]) if os.getenv("REPORT_DATE") else now.astimezone(ZoneInfo("Europe/London")).date()
     preview=bool(os.getenv("REPORT_DATE"))
     report={"scope":"European senior mens national teams - UEFA Nations League and European World Cup qualifying", "date_uk":str(today),"generated_utc":now.isoformat(),"status":"incomplete",
-            "qualifying":[],"warnings":[],"events_checked":0,"requests":0,"preview":preview}
+            "qualifying":[],"fixtures":[],"warnings":[],"events_checked":0,"requests":0,"preview":preview}
     def save():
         Path("international_football_live.json").write_text(json.dumps(report,indent=2))
     key=os.getenv("ODDS_API_KEY")
@@ -102,20 +102,37 @@ def main():
                 if not (kick>now and kick.astimezone(ZoneInfo("Europe/London")).date()==today):continue
                 report["events_checked"]+=1
                 h=team_map.get(team_key(e["home_team"]));a=team_map.get(team_key(e["away_team"]))
+                fixture={"competition":sport,"home":e["home_team"],"away":e["away_team"],
+                         "kickoff_utc":e["commence_time"],"markets":{}}
+                report["fixtures"].append(fixture)
                 if not h or not a:
                     report["warnings"].append(f"Unmatched teams: {e['home_team']} v {e['away_team']}")
-                    incomplete=True;continue
-                # Venue neutrality is not reliably available in odds events. Skip
-                # tournaments with potentially neutral venues rather than guess.
-                if sport not in ALLOWED:
-                    report["warnings"].append(f"Neutral venue unverified: {sport}")
+                    fixture["status"]="unmatched_teams"
                     incomplete=True;continue
                 probs=predict(model,h,a,False)
-                for market,offers in markets(e).items():
-                    if len({b[0] for b in offers})<2:continue
+                if probs is None:
+                    fixture["status"]="model_unavailable"
+                    incomplete=True;continue
+                available=markets(e)
+                for market in ("over25","btts"):
+                    offers=available.get(market,[])
+                    unique={b[0] for b in offers}
+                    detail={"model_probability":round(probs[market],4),
+                            "bookmakers":[{"name":name,"odds":odds} for _,name,odds in sorted(offers,key=lambda x:-x[2])],
+                            "bookmaker_count":len(unique)}
+                    fixture["markets"][market]=detail
+                    if not offers:
+                        detail["status"]="provider_unsupported" if (market=="btts" and "btts" in unsupported_markets) else "no_prices"
+                        continue
                     best=max(offers,key=lambda x:x[2])
                     odds=best[2];p=probs[market];edge=p-1/odds
-                    if odds>=1.8 and edge>=0.05:
+                    detail.update({"best_odds":odds,"best_bookmaker":best[1],
+                                   "edge":round(edge,4),"ev":round(p*odds-1,4)})
+                    if len(unique)<2: detail["status"]="fewer_than_two_bookmakers"
+                    elif odds<1.8: detail["status"]="odds_below_1_80"
+                    elif edge<0.05: detail["status"]="edge_below_5pp"
+                    else:
+                        detail["status"]="qualifies"
                         candidates.append({"competition":sport,"home":e["home_team"],"away":e["away_team"],
                             "kickoff_utc":e["commence_time"],"market":market,"odds":odds,
                             "bookmaker":best[1],"model_probability":round(p,4),
