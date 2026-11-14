@@ -74,8 +74,9 @@ def backtest(d,first_year=2023):
             p=predict(model,m.home_team,m.away_team,m.neutral)
             if p is None: continue
             rows.append({"date":m.date,"competition":m.competition,"home":m.home_team,"away":m.away_team,
-                "over25_p":p["over25"],"btts_p":p["btts"],
+                "over25_p":p["over25"],"under25_p":1-p["over25"],"btts_p":p["btts"],
                 "over25_result":int(m.home_goals+m.away_goals>=3),
+                "under25_result":int(m.home_goals+m.away_goals<=2),
                 "btts_result":int(m.home_goals>0 and m.away_goals>0)})
     return pd.DataFrame(rows)
 def main():
@@ -89,11 +90,11 @@ def main():
     out=Path(args.out);out.mkdir(parents=True,exist_ok=True)
     pred.to_csv(out/"predictions.csv",index=False)
     scores=[]
-    for market in ("over25","btts"):
+    for market in ("over25","under25"):
         p=pred[f"{market}_p"].to_numpy();y=pred[f"{market}_result"].to_numpy()
         scores.append({"market":market,"n":len(y),"brier":float(np.mean((p-y)**2)),
             "predicted_rate":float(np.mean(p)),"actual_rate":float(np.mean(y))})
     pd.DataFrame(scores).to_csv(out/"calibration.csv",index=False)
     print(pd.DataFrame(scores).to_string(index=False))
-    print("Research only: no bookmaker odds, ROI, Telegram alerts or betting.")
+    print("Research only: outcome calibration and threshold win rates are NOT betting ROI.")
 if __name__=="__main__":main()
