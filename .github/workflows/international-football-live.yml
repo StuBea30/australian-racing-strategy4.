@@ -1,6 +1,11 @@
 name: International Football 1.0 - Live Opportunities
 on:
   workflow_dispatch:
+    inputs:
+      report_date:
+        description: "Optional preview date YYYY-MM-DD (no Telegram)"
+        required: false
+        type: string
   schedule:
     - cron: '30 7,8 * * *'
 permissions:
@@ -30,6 +35,7 @@ jobs:
       - name: Scan competitive internationals independently
         if: steps.timecheck.outputs.run == 'true'
         env:
+          REPORT_DATE: ${{ inputs.report_date }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
