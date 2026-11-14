@@ -1,0 +1,25 @@
+name: International Football - API-Football Feed Test
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Check API-Football account and fixture coverage (no bets or Telegram)
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: python international_football/api_football_probe.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-football-feed-test
+          path: international_football_api_probe.json
+          if-no-files-found: ignore
