@@ -65,13 +65,28 @@ def main():
             if report["requests"]>=10:
                 report["warnings"].append("10-request budget reached; coverage incomplete")
                 incomplete=True;break
-            response=requests.get(API+f"/sports/{sport}/odds",params={
-                "apiKey":key,"regions":"uk","markets":"totals,btts","oddsFormat":"decimal"},timeout=30)
-            report["requests"]+=2
-            if not response.ok:
-                report["warnings"].append(f"{sport}: HTTP {response.status_code}")
-                incomplete=True;continue
-            for e in response.json():
+            # The Odds API may reject combined market requests for some sports.
+            # Try each market independently, preserving per-market errors and coverage.
+            raw_events={}
+            for mk in ("totals","btts"):
+                if report["requests"]>=10:
+                    report["warnings"].append("10-request budget reached; coverage incomplete")
+                    incomplete=True;break
+                response=requests.get(API+f"/sports/{sport}/odds",params={
+                    "apiKey":key,"regions":"uk","markets":mk,"oddsFormat":"decimal"},timeout=30)
+                report["requests"]+=1
+                if not response.ok:
+                    report["warnings"].append(f"{sport} {mk}: HTTP {response.status_code} — {response.text[:220]}")
+                    incomplete=True;continue
+                for item in response.json():
+                    target=raw_events.setdefault(item["id"],{**item,"bookmakers":[]})
+                    for book in item.get("bookmakers",[]):
+                        existing=next((x for x in target["bookmakers"] if x.get("key")==book.get("key")),None)
+                        if existing:
+                            existing["markets"].extend(book.get("markets",[]))
+                        else:
+                            target["bookmakers"].append({**book,"markets":list(book.get("markets",[]))})
+            for e in raw_events.values():
                 kick=datetime.fromisoformat(e["commence_time"].replace("Z","+00:00"))
                 if not (kick>now and kick.astimezone(ZoneInfo("Europe/London")).date()==today):continue
                 report["events_checked"]+=1
