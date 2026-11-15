@@ -24,12 +24,17 @@ jobs:
         id: timecheck
         env:
           EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_CRON: ${{ github.event.schedule }}
         run: |
           python - <<'PY'
           import os
           from datetime import datetime
           from zoneinfo import ZoneInfo
-          allowed=os.environ["EVENT_NAME"]=="workflow_dispatch" or datetime.now(ZoneInfo("Europe/London")).hour==8
+          now=datetime.now(ZoneInfo("Europe/London"))
+          expected="30 7 * * *" if now.utcoffset().total_seconds()==3600 else "30 8 * * *"
+          allowed=(os.environ["EVENT_NAME"]=="workflow_dispatch" or
+                   (os.environ.get("SCHEDULE_CRON")==expected and 8<=now.hour<=12))
+          print(f"UK time={now.isoformat()} expected_schedule={expected} permitted={allowed}")
           with open(os.environ["GITHUB_OUTPUT"],"a") as f:f.write(f"run={str(allowed).lower()}\n")
           PY
       - name: Scan competitive internationals independently
