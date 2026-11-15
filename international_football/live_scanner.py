@@ -160,21 +160,29 @@ def main():
         report["warnings"].append(f"Scan failed: {type(e).__name__}: {e}")
     save()
     print(json.dumps(report,indent=2))
-    # Send only genuine, fully checked qualifying selections; don't send an
-    # unverified no-bet claim. A partial scan can still show verified bets.
-    if not preview and report["qualifying"] and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
+    # Send a daily audit, including genuine no-bet outcomes and incomplete scans.
+    # Never label an incomplete scan as a verified no-bet result.
+    if not preview and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
         lines=[f"🇪🇺 EUROPEAN INTERNATIONAL FOOTBALL 1.1 — {today:%d %b %Y}",
                "Separate from domestic challenge | suggestions only",
-               "Over 2.5: >=1.80, >=5pp edge | Under 2.5: >=2.00, >=8pp edge (provisional calibrated estimate)"]
-        for i,c in enumerate(report["qualifying"],1):
-            lines.extend(["",f"{i}. {c['home']} v {c['away']}",
-                          f"{c['market'].upper()} | {c['odds']:.2f} ({c['bookmaker']})",
-                          f"Model {c['model_probability']:.1%} | Edge +{c['edge']:.1%} | £5"])
-        if report["status"]=="incomplete":lines.append("WARNING: other fixtures not fully checked")
+               f"Fixtures checked: {report['events_checked']} | Scan: {report['status']}",
+               "Over 2.5: >=1.80, >=5pp edge | Under 2.5: >=2.00, >=8pp edge (provisional 0.85 adjustment)"]
+        if report["qualifying"]:
+            for i,c in enumerate(report["qualifying"],1):
+                lines.extend(["",f"{i}. {c['home']} v {c['away']}",
+                              f"{c['market'].upper()} | {c['odds']:.2f} ({c['bookmaker']})",
+                              f"Model {c['model_probability']:.1%} | Edge +{c['edge']:.1%} | £5"])
+        elif report["status"]=="checked":
+            lines.append("NO BET — no selections met the verified strategy thresholds.")
+        else:
+            lines.append("NO VERIFIED SELECTIONS — scan incomplete/unavailable; NOT a confirmed no-value finding.")
+        if report["status"]!="checked":
+            lines.append("WARNING: fixture/market coverage not fully verified.")
+        for warning in report["warnings"][:3]:
+            lines.append(f"Warning: {warning[:160]}")
         resp=requests.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-            json={"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":"
-".join(lines)},timeout=30)
+            json={"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":"\\n".join(lines)},timeout=30)
         resp.raise_for_status()
-    elif report["status"]=="incomplete":
-        print("No Telegram: scan incomplete")
+    elif not preview:
+        print("Telegram not configured; report saved to artifact")
 if __name__=="__main__":main()
