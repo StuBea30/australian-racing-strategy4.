@@ -181,7 +181,7 @@ def main():
         for warning in report["warnings"][:3]:
             lines.append(f"Warning: {warning[:160]}")
         resp=requests.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-            json={"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":"\\n".join(lines)},timeout=30)
+            json={"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":"\n".join(lines)},timeout=30)
         resp.raise_for_status()
     elif not preview:
         print("Telegram not configured; report saved to artifact")
