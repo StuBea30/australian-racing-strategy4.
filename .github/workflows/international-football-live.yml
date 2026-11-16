@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install requests pandas numpy scipy
-      - name: Check UK local 08:30
+      - name: Identify intended UK morning schedule
         id: timecheck
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -33,18 +33,40 @@ jobs:
           now=datetime.now(ZoneInfo("Europe/London"))
           expected="30 7 * * *" if now.utcoffset().total_seconds()==3600 else "30 8 * * *"
           allowed=(os.environ["EVENT_NAME"]=="workflow_dispatch" or
-                   (os.environ.get("SCHEDULE_CRON")==expected and 8<=now.hour<=12))
-          print(f"UK time={now.isoformat()} expected_schedule={expected} permitted={allowed}")
+                   (os.environ.get("SCHEDULE_CRON")==expected and True))
+          print(f"UK time={now.isoformat()} expected_schedule={expected} permitted={allowed}; late scheduled jobs are allowed")
           with open(os.environ["GITHUB_OUTPUT"],"a") as f:f.write(f"run={str(allowed).lower()}\n")
           PY
+      - name: Identify UK reporting date
+        id: reportday
+        run: echo "date=$(TZ=Europe/London date +%F)" >> "$GITHUB_OUTPUT"
+      - name: Check if today's scheduled report was already generated
+        id: daily_cache
+        if: github.event_name == 'schedule' && steps.timecheck.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .international-football-sent
+          key: international-football-1-1-${{ steps.reportday.outputs.date }}
       - name: Scan competitive internationals independently
-        if: steps.timecheck.outputs.run == 'true'
+        if: steps.timecheck.outputs.run == 'true' && (github.event_name != 'schedule' || steps.daily_cache.outputs.cache-hit != 'true')
+        id: live_scan
         env:
           REPORT_DATE: ${{ inputs.report_date }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python international_football/live_scanner.py
+      - name: Mark scheduled report as generated
+        if: github.event_name == 'schedule' && steps.live_scan.outcome == 'success'
+        run: |
+          mkdir -p .international-football-sent
+          echo "${{ steps.reportday.outputs.date }}" > .international-football-sent/report-date.txt
+      - name: Remember today's completed scheduled report
+        if: github.event_name == 'schedule' && steps.live_scan.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .international-football-sent
+          key: international-football-1-1-${{ steps.reportday.outputs.date }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
