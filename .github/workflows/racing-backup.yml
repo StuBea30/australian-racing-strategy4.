@@ -1,0 +1,48 @@
+name: Australian Racing 4.1 - Delivery Backup
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Backup checks after the primary 21:30 UK delivery window.
+    # GitHub cron uses UTC; two checks help with delayed scheduled starts.
+    - cron: '0,30 22 * * *'
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: strategy41-backup
+  cancel-in-progress: false
+
+jobs:
+  check-and-retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check receipt and dispatch missing report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_REF: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The primary workflow targets the current Australian racing day.
+          race_date="$(TZ=Australia/Sydney date +%F)"
+          receipt="strategy41-delivered-${race_date}"
+          echo "Checking delivery for ${race_date}"
+          if gh api "repos/${GH_REPO}/actions/artifacts?per_page=100&name=${receipt}" \
+              --jq '.artifacts[] | select(.expired == false and .name == "'"${receipt}"'") | .id' | grep -q .; then
+            echo "Telegram delivery receipt exists; no backup needed."
+            exit 0
+          fi
+          # Avoid dispatching while a main report is still queued or running.
+          for status in queued in_progress; do
+            if gh api "repos/${GH_REPO}/actions/workflows/racing.yml/runs?status=${status}&per_page=20" \
+                --jq '.workflow_runs[] | .id' | grep -q .; then
+              echo "Primary workflow is ${status}; leaving it to finish."
+              exit 0
+            fi
+          done
+          echo "No receipt and no active main run: dispatching backup."
+          gh workflow run racing.yml --repo "${GH_REPO}" --ref "${GH_REF}" -f race_date="${race_date}"
