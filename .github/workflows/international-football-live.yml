@@ -14,6 +14,9 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    concurrency:
+      group: international-football-live-daily
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,7 +36,7 @@ jobs:
           now=datetime.now(ZoneInfo("Europe/London"))
           expected="30 7 * * *" if now.utcoffset().total_seconds()==3600 else "30 8 * * *"
           allowed=(os.environ["EVENT_NAME"]=="workflow_dispatch" or
-                   (os.environ.get("SCHEDULE_CRON")==expected and True))
+                   os.environ.get("SCHEDULE_CRON")==expected)
           print(f"UK time={now.isoformat()} expected_schedule={expected} permitted={allowed}; late scheduled jobs are allowed")
           with open(os.environ["GITHUB_OUTPUT"],"a") as f:f.write(f"run={str(allowed).lower()}\n")
           PY
