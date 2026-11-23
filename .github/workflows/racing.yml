@@ -8,7 +8,10 @@ on:
         required: false
         type: string
   schedule:
-    - cron: '30 20,21 * * *'
+    # Earlier redundant starts to absorb GitHub schedule delays (UTC).
+    # Delivery is deduplicated by per-race-date receipt.
+    - cron: '0,30 19,20 * * *'
+    - cron: '0 21 * * *'
 
 permissions:
   contents: read
