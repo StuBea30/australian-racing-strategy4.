@@ -3,9 +3,10 @@ name: Australian Racing 4.1 - Delivery Backup
 on:
   workflow_dispatch:
   schedule:
-    # Backup checks after the primary 21:30 UK delivery window.
-    # GitHub cron uses UTC; two checks help with delayed scheduled starts.
-    - cron: '0,30 22 * * *'
+    # Earlier, repeated checks; UTC schedule covers GMT and BST.
+    # Still GitHub-hosted, so cannot guarantee a precise delivery time.
+    - cron: '15,45 20,21 * * *'
+    - cron: '15 22 * * *'
 
 permissions:
   contents: read
