@@ -10,8 +10,8 @@ on:
   schedule:
     # Earlier redundant starts to absorb GitHub schedule delays (UTC).
     # Delivery is deduplicated by per-race-date receipt.
-    - cron: '0,30 19,20 * * *'
-    - cron: '0 21 * * *'
+    - cron: '7,37 20 * * *'
+    - cron: '7 21 * * *'
 
 permissions:
   contents: read
@@ -40,12 +40,13 @@ jobs:
         env:
           MANUAL_DATE: ${{ inputs.race_date }}
           EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_CRON: ${{ github.event.schedule }}
         run: |
           if [[ "$EVENT_NAME" == 'schedule' ]]; then
             # Scheduled GitHub Actions may be delayed by hours. Never skip
             # based on the runner's actual start time. The delivery-receipt
             # check below prevents a second successful Telegram delivery.
-            echo "Scheduled trigger accepted regardless of runner start hour"
+            echo "Scheduled trigger: $SCHEDULE_CRON; actual UTC start: $(date -u +%FT%TZ)"
           fi
           if [[ -n "$MANUAL_DATE" ]]; then
             if [[ ! "$MANUAL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || \
