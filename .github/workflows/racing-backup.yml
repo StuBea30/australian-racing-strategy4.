@@ -5,8 +5,7 @@ on:
   schedule:
     # Earlier, repeated checks; UTC schedule covers GMT and BST.
     # Still GitHub-hosted, so cannot guarantee a precise delivery time.
-    - cron: '15,45 20,21 * * *'
-    - cron: '15 22 * * *'
+    - cron: '17,37 21 * * *'
 
 permissions:
   contents: read
@@ -25,9 +24,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           GH_REF: ${{ github.event.repository.default_branch }}
+          SCHEDULE_CRON: ${{ github.event.schedule }}
         shell: bash
         run: |
           set -euo pipefail
+          echo "Scheduled trigger: $SCHEDULE_CRON; actual UTC start: $(date -u +%FT%TZ)"
           # The primary workflow targets the current Australian racing day.
           race_date="$(TZ=Australia/Sydney date +%F)"
           receipt="strategy41-delivered-${race_date}"
