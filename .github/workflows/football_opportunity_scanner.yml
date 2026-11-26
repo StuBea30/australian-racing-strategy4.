@@ -40,7 +40,7 @@ jobs:
           expected = "23 8 * * *" if winter else "23 7 * * *"
           allowed = os.environ['EVENT_NAME'] == 'workflow_dispatch' or os.environ.get('SCHEDULE_CRON') == expected
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'run={str(allowed).lower()}\\n')
+              f.write(f'run={str(allowed).lower()}\n')
           print(f'Scheduled cron: {os.environ.get("SCHEDULE_CRON")}; actual UTC start: {now.isoformat()}; UK: {local}; expected: {expected}; execute: {allowed}')
           PY
       - name: Generate fresh football probabilities
